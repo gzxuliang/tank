@@ -1,0 +1,82 @@
+/* 坦克大战 —— 页面外观 */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body {
+    height: 100%;
+}
+
+body {
+    background: radial-gradient(ellipse at 50% 30%, #1a1a2e 0%, #0b0b14 60%, #050508 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    color: #888;
+    overflow: hidden;
+}
+
+.page {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+}
+
+/* 游戏画面容器：相对定位以叠加 CRT 滤镜 */
+#stage-wrap {
+    position: relative;
+    line-height: 0;
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow:
+        0 0 0 4px #22242c,
+        0 0 40px rgba(60, 90, 200, 0.25),
+        0 20px 60px rgba(0, 0, 0, 0.6);
+}
+
+#game {
+    /* 保持 256:224 比例自适应窗口，高清平滑渲染 */
+    width: min(92vw, calc((100vh - 90px) * 256 / 224));
+    height: auto;
+    display: block;
+    background: #000;
+}
+
+/* CRT 扫描线滤镜 */
+#stage-wrap.crt::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+        repeating-linear-gradient(
+            to bottom,
+            rgba(0, 0, 0, 0) 0px,
+            rgba(0, 0, 0, 0) 2px,
+            rgba(0, 0, 0, 0.18) 3px
+        );
+    mix-blend-mode: multiply;
+}
+
+/* CRT 暗角 */
+#stage-wrap.crt::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 2;
+    background: radial-gradient(ellipse at center,
+        rgba(0, 0, 0, 0) 55%,
+        rgba(0, 0, 0, 0.35) 100%);
+}
+
+.hint {
+    font-size: 12px;
+    letter-spacing: 1px;
+    color: #5a5a70;
+    user-select: none;
+}

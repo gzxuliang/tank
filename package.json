@@ -1,0 +1,7 @@
+{
+  "name": "tank-battle",
+  "version": "1.0.0",
+  "description": "红白机坦克大战复刻 - 纯前端 Canvas 游戏",
+  "type": "module",
+  "private": true
+}
