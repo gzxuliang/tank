@@ -73,11 +73,13 @@ export class Bullet {
         }
       }
     } else {
-      const p = world.player;
-      if (p && p.alive && p.spawnTimer <= 0 && this._overlaps(p)) {
-        world.bulletExplode(this, false);
-        world.playerHit(this);
-        return;
+      for (const p of world.players) {
+        if (!p.alive || p.spawnTimer > 0) continue;
+        if (this._overlaps(p)) {
+          world.bulletExplode(this, false);
+          world.playerHit(this, p);
+          return;
+        }
       }
     }
   }

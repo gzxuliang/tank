@@ -109,7 +109,7 @@ check('开幕后进入战斗场景', game.engine.scene.constructor.name === 'Gam
 const world = game.engine.scene.world;
 check('世界已创建', !!world);
 check('玩家已出生', world.player && world.player.alive);
-check('开局命数为 3', world.lives === 3);
+check('开局命数为 3', world.lives[0] === 3);
 check('出击队列 20 辆', world.spawnQueue.length === 20);
 
 // ---- 全部关卡出怪点畅通 ----
@@ -118,7 +118,7 @@ console.log('— 关卡出怪点 —');
 {
   const { LEVELS } = await import('../src/game/levels.js');
   const { TileMap } = await import('../src/game/tilemap.js');
-  const { ENEMY_SPAWNS, TILE } = await import('../src/core/const.js');
+  const { ENEMY_SPAWNS, PLAYER_SPAWN, PLAYER2_SPAWN, TILE } = await import('../src/core/const.js');
   for (let i = 0; i < LEVELS.length; i++) {
     const tm = new TileMap();
     tm.loadLevel(LEVELS[i]);
@@ -131,6 +131,10 @@ console.log('— 关卡出怪点 —');
         .some(([dx, dy]) => !tm.isSolidForTank(x + dx, y + dy, 16, 16));
     });
     check(`第 ${i + 1} 关三个出怪点畅通且有出路`, ok);
+    // 双人出生点不被地形阻挡
+    const p1ok = !tm.isSolidForTank(PLAYER_SPAWN.tx * TILE, PLAYER_SPAWN.ty * TILE, 16, 16);
+    const p2ok = !tm.isSolidForTank(PLAYER2_SPAWN.tx * TILE, PLAYER2_SPAWN.ty * TILE, 16, 16);
+    check(`第 ${i + 1} 关双人出生点无阻挡`, p1ok && p2ok);
   }
 }
 
@@ -220,20 +224,20 @@ check('三星子弹击穿钢墙', world.tilemap.cells[world.tilemap.idx(6, 5)] =
 // ---- 道具六种效果 ----
 console.log('— 道具效果 —');
 const lv0 = world.player.level;
-world._applyPowerup({ type: 'star', x: 0, y: 0 });
+world._applyPowerup({ type: 'star', x: 0, y: 0 }, world.player);
 check('⭐ 升级生效', world.player.level === lv0 + 1);
-world._applyPowerup({ type: 'helmet', x: 0, y: 0 });
+world._applyPowerup({ type: 'helmet', x: 0, y: 0 }, world.player);
 check('🛡 护盾生效', world.player.shieldTimer > 0);
-world._applyPowerup({ type: 'clock', x: 0, y: 0 });
+world._applyPowerup({ type: 'clock', x: 0, y: 0 }, world.player);
 check('⏱ 冻结生效', world.freezeTimer > 0);
-world._applyPowerup({ type: 'shovel', x: 0, y: 0 });
+world._applyPowerup({ type: 'shovel', x: 0, y: 0 }, world.player);
 check('🔧 基地钢墙生效', world.shovelTimer > 0);
-const lives0 = world.lives;
-world._applyPowerup({ type: 'life', x: 0, y: 0 });
-check('🚜 加命生效', world.lives === lives0 + 1);
+const lives0 = world.lives[0];
+world._applyPowerup({ type: 'life', x: 0, y: 0 }, world.player);
+check('🚜 加命生效', world.lives[0] === lives0 + 1);
 if (world.enemies.length > 0) {
   const aliveBefore = world.enemies.filter((e) => e.alive).length;
-  world._applyPowerup({ type: 'grenade', x: 0, y: 0 });
+  world._applyPowerup({ type: 'grenade', x: 0, y: 0 }, world.player);
   check('💣 清屏生效', world.enemies.filter((e) => e.alive).length === 0 && aliveBefore > 0);
 } else {
   check('💣 清屏生效（场上无敌坦，跳过）', true);
@@ -318,6 +322,305 @@ if (game.engine.scene.constructor.name === 'GameScene') {
   }
 } else {
   check('战斗已在混战中自然流转', sceneBefore !== 'GameScene' || true);
+}
+
+// ---- 本地双人模式 ----
+console.log('— 本地双人 —');
+{
+  // 回到标题后选择「双人游戏」（菜单第 2 项）
+  if (game.engine.scene.constructor.name !== 'TitleScene') {
+    game.engine.changeScene(new (await import('../src/scenes/title.js')).TitleScene(game));
+    frames(5);
+  }
+  key('ArrowDown'); key('ArrowDown', false);
+  frames(2);
+  key('Enter'); key('Enter', false);
+  frames(5);
+  check('选择双人后进入开幕', game.engine.scene.constructor.name === 'IntroScene');
+  frames(100);
+  check('进入双人战斗', game.engine.scene.constructor.name === 'GameScene');
+  const w2 = game.engine.scene.world;
+  check('双人模式两名玩家', w2.playerCount === 2 && w2.players.length === 2);
+  check('双人命数各自独立', w2.lives[0] === 3 && w2.lives[1] === 3);
+  check('P2 出生在基地右侧', w2.players[1].x > w2.players[0].x);
+  check('P2 使用绿色系调色板', w2.players[1].paletteName() === 'ally0');
+
+  frames(40); // 出生动画结束
+  const p2x0 = w2.players[1].x;
+  key('KeyD'); frames(20); key('KeyD', false);
+  check('P2（WASD）移动生效', w2.players[1].x > p2x0);
+  key('KeyF'); key('KeyF', false);
+  frames(1);
+  check('P2（F）射击生效', w2.bullets.some((b) => b.owner === w2.players[1]));
+  frames(30);
+
+  // P1 阵亡：游戏继续，P2 不受影响
+  w2.players[0].shieldTimer = 0; w2.players[0].spawnTimer = 0;
+  w2.playerHit({ x: 0, y: 0 }, w2.players[0]);
+  check('P1 阵亡扣自己的命', w2.lives[0] === 2 && w2.lives[1] === 3);
+  check('P1 阵亡后游戏继续', w2.state === 'playing' && w2.players[1].alive);
+
+  // 道具归属拾取者
+  w2._applyPowerup({ type: 'life', x: 0, y: 0 }, w2.players[1]);
+  check('加命道具归拾取者（P2）', w2.lives[1] === 4 && w2.lives[0] === 2);
+  const p1lv = w2.players[0].level;
+  w2._applyPowerup({ type: 'star', x: 0, y: 0 }, w2.players[1]);
+  check('星星只升级拾取者（P2）', w2.players[1].level === 1 && w2.players[0].level === p1lv);
+
+  // 双方命数耗尽才判负
+  w2.lives[0] = 0; w2.lives[1] = 1;
+  w2.respawnTimers[0] = 0;
+  w2.players[1].shieldTimer = 0; w2.players[1].spawnTimer = 0;
+  w2.playerHit({ x: 0, y: 0 }, w2.players[1]);
+  check('全员命数耗尽判负', w2.state === 'over' && w2.overReason === 'tank');
+  frames(200); // 流向 GameOverScene
+  key('Enter'); key('Enter', false);
+  frames(10);
+}
+
+// ---- 回归：重生时出生点被占用（敌坦压杀 / 队友避让，防坦克重叠卡死）----
+console.log('— 重生占位处理 —');
+{
+  const { World } = await import('../src/game/world.js');
+  const { Enemy } = await import('../src/game/enemy.js');
+  const { NetInput } = await import('../src/core/input.js');
+
+  // 敌坦占用出生点：重生时直接压杀
+  const g3 = Object.create(game);
+  g3.mode = '1p'; g3.playerLevels = [0, 0]; g3.lives = [3, 3]; g3.score = 0;
+  const w3 = new World(g3, 0);
+  w3.spawnTimer = 99999; // 不再出新敌坦，保持场景确定
+  const in3 = new NetInput();
+  const p1 = w3.players[0];
+  p1.shieldTimer = 0; p1.spawnTimer = 0;
+  const e = new Enemy(p1.x, p1.y, 'basic', false, w3.rand);
+  e.id = 999; e.spawnTimer = 0; e.frozen = true; // 冻结在出生点上
+  w3.enemies.push(e);
+  w3.playerHit({ x: 0, y: 0 }, p1);
+  for (let f = 0; f < 80; f++) { w3.update([in3]); in3.postUpdate(); }
+  check('出生点敌坦被重生压杀', !w3.enemies.some((x) => x.id === 999));
+  check('玩家重生后不与任何坦克重叠', p1.alive && !w3.tankBlocked(p1, p1.x, p1.y, 16, 16));
+
+  // 队友占用出生点：重生推迟，让开后才重生
+  const g4 = Object.create(game);
+  g4.mode = '2p'; g4.playerLevels = [0, 0]; g4.lives = [3, 3]; g4.score = 0;
+  const w4 = new World(g4, 0);
+  w4.spawnTimer = 99999;
+  const in4 = new NetInput();
+  const [q1, q2] = w4.players;
+  const sx = q1.x, sy = q1.y;
+  q1.shieldTimer = 0; q1.spawnTimer = 0;
+  q2.shieldTimer = 0; q2.spawnTimer = 0;
+  w4.playerHit({ x: 0, y: 0 }, q1);      // P1 阵亡
+  q2.x = sx; q2.y = sy;                  // P2 停到 P1 出生点上占位
+  for (let f = 0; f < 80; f++) { w4.update([in4, in4]); in4.postUpdate(); }
+  check('队友占位时重生推迟', !q1.alive);
+  q2.x = sx - 32;                        // P2 让开
+  for (let f = 0; f < 40; f++) { w4.update([in4, in4]); in4.postUpdate(); }
+  check('队友让开后正常重生', q1.alive && !w4.tankBlocked(q1, q1.x, q1.y, 16, 16));
+}
+
+// ---- 联网快照同步（主机权威：序列化 → 应用到镜像世界）----
+console.log('— 联网快照同步 —');
+{
+  const { World } = await import('../src/game/world.js');
+  const { NetInput } = await import('../src/core/input.js');
+  const { serializeWorld, applySnapshot, serializeMap, applyMap } = await import('../src/net/sync.js');
+
+  // 主机世界：双人模式，用 NetInput 模拟两端输入
+  const g2 = Object.create(game);
+  g2.mode = '2p';
+  g2.playerLevels = [0, 0];
+  g2.lives = [3, 3];
+  const hostWorld = new World(g2, 0);
+  const mirrorWorld = new World(g2, 0); // 客机镜像：结构相同但不跑逻辑
+  const in1 = new NetInput(), in2 = new NetInput();
+
+  let err = null;
+  try {
+    for (let f = 0; f < 300; f++) {
+      in1.applyRemote({ right: f % 4 < 2, up: f % 4 >= 2 }, f % 30 === 0 ? { fire: true } : {});
+      in2.applyRemote({ left: f % 6 < 3 }, f % 45 === 0 ? { fire: true } : {});
+      hostWorld.update([in1, in2]);
+      in1.postUpdate(); in2.postUpdate();
+    }
+  } catch (e) { err = e; }
+  check('主机 300 帧逻辑无异常', !err);
+  if (err) console.error(err);
+
+  // 快照应用：实体计数与关键状态一致
+  const snap = serializeWorld(hostWorld, {});
+  applySnapshot(mirrorWorld, snap);
+  check('快照同步玩家目标位置',
+    mirrorWorld.players[0]._tx === hostWorld.players[0].x &&
+    mirrorWorld.players[1]._tx === hostWorld.players[1].x);
+  check('快照同步敌坦数量', mirrorWorld.enemies.length === hostWorld.enemies.length);
+  check('快照同步子弹数量', mirrorWorld.bullets.length === hostWorld.bullets.length);
+  check('快照同步命数与状态',
+    mirrorWorld.lives[0] === hostWorld.lives[0] && mirrorWorld.state === hostWorld.state);
+  check('快照同步敌坦字段',
+    mirrorWorld.enemies.every((e) => {
+      const h = hostWorld.enemies.find((x) => x.id === e.id);
+      return h && e.type === h.type && e.hp === h.hp && e._tx === h.x;
+    }));
+
+  // 平滑趋近：多次平滑后镜像位置收敛到主机位置
+  const { smoothEntities } = await import('../src/net/sync.js');
+  for (let i = 0; i < 60; i++) smoothEntities(mirrorWorld);
+  check('平滑后镜像收敛到主机坐标',
+    Math.abs(mirrorWorld.players[0].x - hostWorld.players[0].x) < 0.5);
+
+  // 地形增量同步：打穿一块砖，序列化/应用后两端一致
+  hostWorld.tilemap.cells[hostWorld.tilemap.idx(5, 5)] = 1;
+  hostWorld.tilemap.brickMask[hostWorld.tilemap.idx(5, 5)] = 0b1111;
+  hostWorld.tilemap.bulletHit(5 * 8, 5 * 8, 8, 4, 1);
+  applyMap(mirrorWorld.tilemap, serializeMap(hostWorld.tilemap, 0));
+  check('地形同步一致',
+    mirrorWorld.tilemap.cells[5 * 26 + 5] === hostWorld.tilemap.cells[5 * 26 + 5] &&
+    mirrorWorld.tilemap.brickMask[5 * 26 + 5] === hostWorld.tilemap.brickMask[5 * 26 + 5]);
+}
+
+// ---- 联网会话端到端（内存传输对：主机权威逻辑 + 客机镜像渲染）----
+console.log('— 联网会话端到端 —');
+{
+  const { World } = await import('../src/game/world.js');
+  const { NetInput } = await import('../src/core/input.js');
+  const { NetClient } = await import('../src/net/client.js');
+  const { NetHostSession, NetClientSession } = await import('../src/net/session.js');
+
+  // 内存双工传输对：host → client、client → host 直接互发
+  let hostH = null, clientH = null;
+  const hostNet = new NetClient('mem', (u, h) => {
+    hostH = h;
+    return { send: (s) => clientH && clientH.message(s), close: () => {} };
+  });
+  const clientNet = new NetClient('mem', (u, h) => {
+    clientH = h;
+    return { send: (s) => hostH && hostH.message(s), close: () => {} };
+  });
+  hostNet.connect(); clientNet.connect();
+
+  // 主机端：权威世界 + 会话（P1 输入本地，P2 输入来自网络）
+  const hostGame = Object.create(game);
+  hostGame.mode = 'net-host';
+  hostGame.playerLevels = [0, 0]; hostGame.lives = [3, 3]; hostGame.score = 0;
+  hostGame.input = new NetInput();
+  hostGame.net = { client: hostNet };
+  const hostScene = { world: new World(hostGame, 0), stageIndex: 0, paused: false };
+
+  // 客机端：镜像世界 + 会话
+  const clientGame = Object.create(game);
+  clientGame.mode = 'net-client';
+  clientGame.playerLevels = [0, 0]; clientGame.lives = [3, 3]; clientGame.score = 0;
+  clientGame.input = new NetInput();
+  clientGame.net = { client: clientNet };
+  const clientScene = { world: new World(clientGame, 0), stageIndex: 0, paused: false };
+
+  const hostSess = new NetHostSession(hostGame, hostScene);
+  const clientSess = new NetClientSession(clientGame, clientScene);
+
+  let err = null;
+  try {
+    for (let f = 0; f < 240; f++) {
+      // 主机玩家原地，客机玩家（P2）持续向右 + 间歇射击
+      hostGame.input.applyRemote({}, {});
+      clientGame.input.applyRemote({ right: true }, f % 40 === 0 ? { fire: true } : {});
+      hostSess.update();
+      clientSess.update();
+      hostGame.input.postUpdate();
+      clientGame.input.postUpdate();
+    }
+  } catch (e) { err = e; }
+  check('双端 240 帧会话无异常', !err);
+  if (err) console.error(err);
+
+  const hw = hostScene.world, cw = clientScene.world;
+  check('客机输入驱动了主机世界的 P2', hw.players[1].x > 18 * 8); // P2 出生 x=144，向右移动过
+  check('P2 位置经快照同步到镜像', Math.abs(cw.players[1]._tx - hw.players[1].x) < 0.001);
+  check('镜像敌坦与主机一致', cw.enemies.length === hw.enemies.length && hw.enemies.length > 0);
+  check('镜像子弹含 P2 所射', hw.bullets.some((b) => b.owner === hw.players[1]) ===
+    cw.bullets.some((b) => b.isPlayerBullet));
+  check('镜像分数与主机一致', cw.game.score === hw.game.score);
+  check('镜像地形与主机一致',
+    cw.tilemap.cells.every((v, i) => v === hw.tilemap.cells[i]) &&
+    cw.tilemap.brickMask.every((v, i) => v === hw.tilemap.brickMask[i]));
+}
+
+// ---- 服务器集成（真实子进程 + ws 协议，覆盖公网加固路径）----
+console.log('— 服务器集成 —');
+{
+  const { spawn } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const { WebSocket } = await import('ws');
+  const port = 18000 + Math.floor(Math.random() * 2000);
+  const srv = spawn(process.execPath,
+    [fileURLToPath(new URL('../server/server.js', import.meta.url))],
+    { env: { ...process.env, PORT: String(port) }, stdio: ['ignore', 'pipe', 'inherit'] });
+  // 等待服务器就绪
+  await new Promise((resolve, reject) => {
+    srv.stdout.on('data', (d) => { if (String(d).includes('已启动')) resolve(); });
+    srv.on('exit', () => reject(new Error('服务器提前退出')));
+    setTimeout(() => reject(new Error('服务器启动超时')), 5000);
+  });
+
+  const url = `ws://127.0.0.1:${port}`;
+  const open = () => new Promise((res, rej) => {
+    const ws = new WebSocket(url);
+    ws.on('open', () => res(ws));
+    ws.on('error', rej);
+  });
+  const nextMsg = (ws, ms = 2000) => new Promise((res, rej) => {
+    const timer = setTimeout(() => rej(new Error('等待消息超时')), ms);
+    ws.once('message', (raw) => { clearTimeout(timer); res(JSON.parse(raw)); });
+  });
+  const waitClose = (ws, ms = 2000) => new Promise((res) => {
+    const timer = setTimeout(() => res(0), ms);
+    ws.once('close', (code) => { clearTimeout(timer); res(code); });
+  });
+
+  let err = null;
+  try {
+    // 建房 → 加入 → 转发
+    const host = await open();
+    const createdP = nextMsg(host);
+    host.send(JSON.stringify({ t: 'create' }));
+    const created = await createdP;
+    check('服务器建房返回 4 位房间码', created.t === 'created' && /^\d{4}$/.test(created.code));
+
+    const guest = await open();
+    const joinedP = nextMsg(guest);
+    const peerP = nextMsg(host);
+    guest.send(JSON.stringify({ t: 'join', code: created.code }));
+    check('加入房间成功', (await joinedP).t === 'joined');
+    check('房主收到 peer-joined', (await peerP).t === 'peer-joined');
+
+    const relayP = nextMsg(guest);
+    host.send(JSON.stringify({ t: 'relay', data: { t: 'snap', n: 1 } }));
+    const relayed = await relayP;
+    check('relay 原样转发', relayed.t === 'relay' && relayed.data.n === 1);
+
+    // 加入不存在的房间（0000 不在 1000–9999 生成范围内）
+    const guest2 = await open();
+    const errP = nextMsg(guest2);
+    guest2.send(JSON.stringify({ t: 'join', code: '0000' }));
+    check('加入不存在房间返回 error', (await errP).t === 'error');
+
+    // 一方断开 → 对端 peer-left
+    const leftP = nextMsg(guest);
+    host.close();
+    check('断开后对端收到 peer-left', (await leftP).t === 'peer-left');
+
+    // 超过 maxPayload（64KB）的消息被服务器断开（ws 关闭码 1009）
+    const big = await open();
+    const closeP = waitClose(big);
+    big.send(JSON.stringify({ t: 'relay', data: 'x'.repeat(70 * 1024) }));
+    check('超限消息被服务器断开', (await closeP) === 1009);
+
+    guest.close(); guest2.close();
+  } catch (e) { err = e; }
+  check('服务器集成测试无异常', !err);
+  if (err) console.error(err);
+  srv.kill();
 }
 
 console.log(`\n结果：${pass} 通过，${fail} 失败`);

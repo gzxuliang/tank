@@ -3,9 +3,10 @@ import { Tank } from './tank.js';
 import { SHIELD_TIME, SPAWN_SHIELD_TIME } from '../core/const.js';
 
 export class Player extends Tank {
-  constructor(x, y) {
+  constructor(x, y, slot = 0) {
     super(x, y, 0);
     this.isPlayer = true;
+    this.slot = slot;      // 0=P1 1=P2（配色/计分归属）
     this.speed = 1.3;
     this.level = 0;          // 0初始 1快弹 2双弹 3破钢
     this.spawnTimer = 32;    // 出生动画
@@ -32,7 +33,8 @@ export class Player extends Tank {
 
   giveShield(frames = SHIELD_TIME) { this.shieldTimer = frames; }
 
-  paletteName() { return 'player' + this.level; }
+  // P1 黄色系 player0-3；P2 绿色系 ally0-3（FC 原版配色）
+  paletteName() { return (this.slot === 0 ? 'player' : 'ally') + this.level; }
 
   update(world, input) {
     this.tickTimers();

@@ -1,8 +1,10 @@
 @echo off
+chcp 65001
 cd /d %~dp0
-echo ÕıÔÚÆô¶¯Ì¹¿Ë´óÕ½...
-echo ÇëÔÚä¯ÀÀÆ÷ÖĞ·ÃÎÊ: http://localhost:8000
-echo °´ Ctrl+C Í£Ö¹·şÎñÆ÷
+echo æ­£åœ¨å¯åŠ¨å¦å…‹å¤§æˆ˜æœåŠ¡å™¨...
+echo æµè§ˆå™¨æ‰“å¼€: http://localhost:8000
+echo å±€åŸŸç½‘å¯¹æˆ˜: è®©å¥½å‹æ‰“å¼€ http://^<æœ¬æœºIP^>:8000
+echo æŒ‰ Ctrl+C åœæ­¢æœåŠ¡å™¨
 start "" http://localhost:8000
-python -m http.server 8000 || py -m http.server 8000
+node server/server.js
 pause

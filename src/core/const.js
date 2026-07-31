@@ -40,6 +40,8 @@ export const BASE_TY = 24;
 // 出生点（小格坐标，坦克 16×16 左上角）
 // 玩家出生点在加厚的基地围墙（第 10 列）左侧留出 4 格宽的通道
 export const PLAYER_SPAWN = { tx: 6, ty: 24 };
+// P2 出生点：与 P1 关于基地对称（FC 原版布局）
+export const PLAYER2_SPAWN = { tx: 18, ty: 24 };
 export const ENEMY_SPAWNS = [
   { tx: 0, ty: 0 },
   { tx: 12, ty: 0 },

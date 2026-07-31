@@ -1,7 +1,16 @@
 {
   "name": "tank-battle",
   "version": "1.0.0",
-  "description": "红白机坦克大战复刻 - 纯前端 Canvas 游戏",
+  "description": "红白机坦克大战复刻 - 支持本地/联网双人的 Canvas 游戏",
   "type": "module",
-  "private": true
+  "private": true,
+  "scripts": {
+    "start": "node server/server.js",
+    "test": "node test/smoke.mjs",
+    "build:worker": "node worker/build-public.mjs",
+    "deploy:worker": "npm run build:worker && wrangler deploy"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
 }

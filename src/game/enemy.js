@@ -41,9 +41,9 @@ export class Enemy extends Tank {
     if (r < 0.45) {
       d = 2; // 大倾向：向下（基地方向）
     } else if (r < 0.7) {
-      // 朝玩家/基地横向对齐
-      const p = world.player;
-      if (p && p.alive) d = p.x > this.x ? 1 : 3;
+      // 朝最近的存活玩家横向对齐
+      const p = world.nearestAlivePlayer(this.x, this.y);
+      if (p) d = p.x > this.x ? 1 : 3;
       else d = this.rand() < 0.5 ? 1 : 3;
     } else {
       d = Math.floor(this.rand() * 4);

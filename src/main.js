@@ -1,6 +1,6 @@
 // 启动入口：初始化引擎、输入、音频、资源，进入标题场景
 import { Engine } from './core/engine.js';
-import { Input } from './core/input.js';
+import { Input, KEYMAP_P1, KEYMAP_P2 } from './core/input.js';
 import { AudioMan } from './core/audio.js';
 import { buildAssets } from './core/assets.js';
 import { LS_HISCORE, LS_STAGE } from './core/const.js';
@@ -9,15 +9,28 @@ import { LEVELS } from './game/levels.js';
 
 const canvas = document.getElementById('game');
 const engine = new Engine(canvas);
-const input = new Input();
+const input1 = new Input(KEYMAP_P1); // P1：方向键 + 空格/J（兼菜单操作）
+const input2 = new Input(KEYMAP_P2); // P2：WASD + F（本地双人）
 const audio = new AudioMan();
 const assets = buildAssets();
 
 const game = {
-  engine, input, audio, assets,
+  engine, audio, assets,
+  input: input1,            // 菜单/全局操作统一用 P1 输入
+  inputs: [input1, input2], // 战斗场景按玩家取用
+  mode: '1p',               // 1p | 2p | net-host | net-client
+  net: null,                // 联网会话（lobby 场景建立）
   score: 0,
+  playerLevels: [0, 0],     // 跨关保留的升级等级（按玩家）
+  lives: [3, 3],            // 跨关保留的命数（按玩家）
   hiScore: parseInt(localStorage.getItem(LS_HISCORE) || '0', 10) || 0,
-  crtOn: false, // 高清画质默认关闭 CRT 滤镜（标题菜单/按 C 可开启）
+
+  // 新开局重置进度（按模式）
+  resetRun() {
+    this.score = 0;
+    this.playerLevels = [0, 0];
+    this.lives = [3, 3];
+  },
 
   addScore(n) {
     this.score += n;
@@ -39,20 +52,14 @@ const game = {
     const cur = parseInt(localStorage.getItem(LS_STAGE) || '1', 10) || 1;
     if (n > cur) localStorage.setItem(LS_STAGE, String(Math.min(n, LEVELS.length)));
   },
-
-  toggleCrt() {
-    this.crtOn = !this.crtOn;
-    document.getElementById('stage-wrap').classList.toggle('crt', this.crtOn);
-  },
 };
 
 // 浏览器策略：首次按键后才能创建 AudioContext
 window.addEventListener('keydown', () => audio.ensure(), { once: true });
 
-// 全局快捷键：M 静音、C CRT 滤镜
+// 全局快捷键：M 静音
 window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyM') { audio.ensure(); audio.toggleMute(); }
-  if (e.code === 'KeyC') { game.toggleCrt(); }
 });
 
 engine.attach(game);

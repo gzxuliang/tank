@@ -1,6 +1,7 @@
 // 世界状态：实体管理、生成调度、胜负判定、全局效果计时
+// 支持单人/双人：玩家以 players[] 管理，命数与击毁统计按人独立
 import {
-  PLAYER_SPAWN, ENEMY_SPAWNS, TILE, MAX_ON_FIELD,
+  PLAYER_SPAWN, PLAYER2_SPAWN, ENEMY_SPAWNS, TILE, MAX_ON_FIELD,
   FREEZE_TIME, SHOVEL_TIME, SHOVEL_BLINK_TIME, POWERUP_SCORE,
   FIELD_X, FIELD_Y, FIELD_SIZE,
 } from '../core/const.js';
@@ -15,10 +16,11 @@ import { FloatText } from '../fx/floattext.js';
 import { buildSpawnQueue, LEVELS } from './levels.js';
 
 const SCORE_COLORS = { basic: '#f0f0f0', fast: '#68d8f0', power: '#78d8c0', armor: '#f0a048' };
+const SPAWNS = [PLAYER_SPAWN, PLAYER2_SPAWN];
 
 export class World {
   constructor(game, stageIndex) {
-    this.game = game;             // {assets, audio, engine, addScore}
+    this.game = game;             // {assets, audio, engine, addScore, mode}
     this.stageIndex = stageIndex;
     this.rand = Math.random;
 
@@ -26,12 +28,27 @@ export class World {
     this.tilemap.loadLevel(LEVELS[stageIndex % LEVELS.length]);
     this.tilemap.fortify(false);  // 自动补齐基地砖墙保护圈
 
-    this.player = new Player(PLAYER_SPAWN.tx * TILE, PLAYER_SPAWN.ty * TILE);
-    // 跨关保留升级等级与命数（仿原版）
-    this.player.level = this.game.playerLevel || 0;
-    this.player._applyLevel();
-    this.lives = this.game.lives ?? 3;
-    this.respawnTimer = 0;
+    // 模式与玩家（1p / 2p / net 均为合作守基地）
+    this.mode = game.mode || '1p';
+    this.playerCount = this.mode === '1p' ? 1 : 2;
+    this.nextId = 1;              // 实体自增 id（联网快照对应用）
+    this.players = [];
+    for (let i = 0; i < this.playerCount; i++) {
+      const sp = SPAWNS[i];
+      const p = new Player(sp.tx * TILE, sp.ty * TILE, i);
+      p.id = this.nextId++;
+      // 跨关保留升级等级（仿原版）
+      p.level = (this.game.playerLevels && this.game.playerLevels[i]) || 0;
+      p._applyLevel();
+      this.players.push(p);
+    }
+    // 命数按人独立（FC 原版规则）
+    this.lives = [];
+    for (let i = 0; i < this.playerCount; i++) {
+      const saved = this.game.lives && this.game.lives[i];
+      this.lives.push(saved != null ? saved : 3);
+    }
+    this.respawnTimers = this.players.map(() => 0);
 
     this.enemies = [];
     this.bullets = [];
@@ -40,12 +57,14 @@ export class World {
     this.particles = new ParticleSystem();
     this.floatTexts = [];
     this.shake = new Shake();
+    this.fxEvents = [];           // 本帧视觉事件队列（联网快照用，主机取走后清空）
 
     this.spawnQueue = buildSpawnQueue(stageIndex);
     this.spawnTimer = 90;         // 开场稍缓再出怪
     this.spawnPointIdx = 0;
 
-    this.killStats = { basic: 0, fast: 0, power: 0, armor: 0 };
+    // 击毁统计按玩家分列
+    this.killStats = this.players.map(() => ({ basic: 0, fast: 0, power: 0, armor: 0 }));
     this.freezeTimer = 0;
     this.shovelTimer = 0;
 
@@ -57,10 +76,23 @@ export class World {
 
   get audio() { return this.game.audio; }
 
-  // ---- 主更新 ----
-  update(input) {
-    const g = this.game;
+  // 兼容旧引用：P1 别名（players[0]）
+  get player() { return this.players[0]; }
 
+  // 距 (x,y) 最近的存活玩家（敌人 AI 瞄准用）
+  nearestAlivePlayer(x, y) {
+    let best = null, bd = Infinity;
+    for (const p of this.players) {
+      if (!p.alive || p.spawnTimer > 0) continue;
+      const d = Math.abs(p.x - x) + Math.abs(p.y - y);
+      if (d < bd) { bd = d; best = p; }
+    }
+    return best;
+  }
+
+  // ---- 主更新 ----
+  // inputs：与 players 对齐的输入数组（单人传 [input]，双人传 [input1, input2]）
+  update(inputs) {
     // 结算/结束状态：仅更新视觉残留
     if (this.state !== 'playing') {
       this.stateTimer--;
@@ -89,14 +121,35 @@ export class World {
 
     this._updateSpawning();
 
-    // 玩家
-    if (this.player.alive) {
-      this.player.update(this, input);
-    } else if (this.respawnTimer > 0) {
-      this.respawnTimer--;
-      if (this.respawnTimer === 0 && this.lives > 0) {
-        this.player.respawn(PLAYER_SPAWN.tx * TILE, PLAYER_SPAWN.ty * TILE);
-        this.audio.respawn();
+    // 玩家（各自独立更新/重生）
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
+      if (p.alive) {
+        p.update(this, inputs[i]);
+      } else if (this.respawnTimers[i] > 0) {
+        this.respawnTimers[i]--;
+        if (this.respawnTimers[i] === 0 && this.lives[i] > 0) {
+          const sp = SPAWNS[i];
+          const sx = sp.tx * TILE, sy = sp.ty * TILE;
+          const onSpawn = (t) =>
+            t.alive && sx < t.x + t.w && sx + 16 > t.x && sy < t.y + t.h && sy + 16 > t.y;
+          // 出生点被敌坦占用：直接压杀（仿 FC 原版），否则重生玩家会与其重叠卡死
+          for (const e of this.enemies) {
+            if (!onSpawn(e)) continue;
+            e.alive = false;
+            const c = e.center();
+            this.explosions.push(new Explosion(c.x, c.y, true));
+            this.fxEvents.push({ k: 'ex', x: c.x, y: c.y, big: true });
+            this.audio.explodeBig();
+          }
+          // 另一名玩家占着出生点则稍后重试
+          if (this.players.some(onSpawn)) {
+            this.respawnTimers[i] = 30;
+          } else {
+            p.respawn(sx, sy);
+            this.audio.respawn();
+          }
+        }
       }
     }
 
@@ -111,11 +164,12 @@ export class World {
 
     // 道具
     for (const p of this.powerups) p.update();
-    if (this.player.alive && this.player.spawnTimer <= 0) {
+    for (const pl of this.players) {
+      if (!pl.alive || pl.spawnTimer > 0) continue;
       for (const p of this.powerups) {
-        if (p.alive && p.overlaps(this.player)) {
+        if (p.alive && p.overlaps(pl)) {
           p.alive = false;
-          this._applyPowerup(p);
+          this._applyPowerup(p, pl);
         }
       }
     }
@@ -123,8 +177,9 @@ export class World {
 
     this._updateFx();
 
-    // 过关判定：出击队列清空且场上无敌
-    if (this.spawnQueue.length === 0 && this.enemies.length === 0 && this.player.alive) {
+    // 过关判定：出击队列清空、场上无敌、至少一人存活
+    if (this.spawnQueue.length === 0 && this.enemies.length === 0 &&
+        this.players.some((p) => p.alive)) {
       this.state = 'clear';
       this.stateTimer = 120;
       this.audio.victory();
@@ -155,6 +210,7 @@ export class World {
       if (!this.tankBlocked(null, x, y, 16, 16)) {
         const next = this.spawnQueue.shift();
         const enemy = new Enemy(x, y, next.type, next.hasPowerup, this.rand);
+        enemy.id = this.nextId++;
         if (this.freezeTimer > 0) enemy.frozen = true; // 冻结期间出生同样被冻结
         this.enemies.push(enemy);
         this.spawnPointIdx = (this.spawnPointIdx + i + 1) % ENEMY_SPAWNS.length;
@@ -170,7 +226,7 @@ export class World {
     const test = (t) =>
       t !== self && t.alive &&
       x < t.x + t.w && x + w > t.x && y < t.y + t.h && y + h > t.y;
-    if (this.player && test(this.player)) return true;
+    if (this.players.some(test)) return true;
     return this.enemies.some(test);
   }
 
@@ -180,7 +236,9 @@ export class World {
   }
 
   spawnBullet(tank) {
-    this.bullets.push(new Bullet(tank));
+    const b = new Bullet(tank);
+    b.id = this.nextId++;
+    this.bullets.push(b);
     // 炮口火光
     const m = tank.muzzle();
     this.particles.burst(m.x, m.y, { count: 4, colors: ['#fff8d0', '#ffd870', '#ffb040'], speed: 0.9, life: 7 });
@@ -196,6 +254,7 @@ export class World {
         if (Math.abs(a.x - b.x) < 4 && Math.abs(a.y - b.y) < 4) {
           a.alive = false; b.alive = false;
           this.explosions.push(new Explosion((a.x + b.x) / 2, (a.y + b.y) / 2, false));
+          this.fxEvents.push({ k: 'ex', x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, big: false });
           this.audio.hitWall();
           break;
         }
@@ -207,17 +266,22 @@ export class World {
   bulletExplode(bullet, big) {
     bullet.alive = false;
     this.explosions.push(new Explosion(bullet.x, bullet.y, big));
+    this.fxEvents.push({ k: 'ex', x: bullet.x, y: bullet.y, big });
     this.particles.spark(bullet.x, bullet.y);
   }
 
   enemyHit(e, bullet) {
     const killed = e.hit(this);
     if (!killed) return;
+    // 击杀归属：玩家子弹按射手 slot 记账，其余（流弹）归 P1
+    const slot = bullet && bullet.owner && bullet.owner.isPlayer ? bullet.owner.slot : 0;
     const c = e.center();
     this.game.addScore(e.score);
-    this.killStats[e.type]++;
+    this.killStats[slot][e.type]++;
     this.floatTexts.push(new FloatText(c.x, c.y, '+' + e.score, SCORE_COLORS[e.type]));
+    this.fxEvents.push({ k: 'ft', x: c.x, y: c.y, text: '+' + e.score, color: SCORE_COLORS[e.type] });
     this.explosions.push(new Explosion(c.x, c.y, true));
+    this.fxEvents.push({ k: 'ex', x: c.x, y: c.y, big: true });
     this.particles.burst(c.x, c.y);
     this.shake.add(2, 10);
     this.game.engine.addHitstop(3);
@@ -225,23 +289,29 @@ export class World {
     if (e.hasPowerup) this._dropPowerup();
   }
 
-  playerHit(bullet) {
-    const p = this.player;
+  playerHit(bullet, p) {
     if (p.shieldTimer > 0) {
       this.particles.spark(bullet.x, bullet.y);
       return;
     }
+    const i = p.slot;
     const c = p.center();
     p.die(this);
-    this.lives--;
+    this.lives[i]--;
     this.explosions.push(new Explosion(c.x, c.y, true));
+    this.fxEvents.push({ k: 'ex', x: c.x, y: c.y, big: true });
     this.particles.burst(c.x, c.y, { count: 18 });
     this.shake.add(4, 25);
     this.game.engine.addHitstop(5);
     this.audio.explodeBig();
-    if (this.lives > 0) {
-      this.respawnTimer = 70;
-    } else {
+    if (this.lives[i] > 0) {
+      this.respawnTimers[i] = 70;
+    }
+    // 所有玩家都阵亡且无余命才判负（一人倒下另一人继续战斗）
+    const canContinue = this.players.some(
+      (pl, idx) => pl.alive || this.lives[idx] > 0 || this.respawnTimers[idx] > 0
+    );
+    if (!canContinue) {
       this.state = 'over';
       this.overReason = 'tank';
       this.stateTimer = 160;
@@ -254,6 +324,7 @@ export class World {
     const b = this.tilemap.baseRect();
     const cx = b.x - FIELD_X + b.w / 2, cy = b.y - FIELD_Y + b.h / 2;
     this.explosions.push(new Explosion(cx, cy, true));
+    this.fxEvents.push({ k: 'ex', x: cx, y: cy, big: true });
     this.particles.burst(cx, cy, { count: 24, speed: 2.2, life: 45 });
     this.shake.add(5, 45);
     this.game.engine.addHitstop(8);
@@ -269,21 +340,24 @@ export class World {
     this.powerups = []; // 场上只保留一个道具（仿原版）
     const type = POWERUP_TYPES[Math.floor(this.rand() * POWERUP_TYPES.length)];
     const pos = this.tilemap.randomEmptySpot(this.rand);
-    this.powerups.push(new PowerUp(pos.x, pos.y, type));
+    const pu = new PowerUp(pos.x, pos.y, type);
+    pu.id = this.nextId++;
+    this.powerups.push(pu);
     this.audio.powerupSpawn();
   }
 
-  _applyPowerup(p) {
+  _applyPowerup(p, player) {
+    const slot = player.slot;
     this.game.addScore(POWERUP_SCORE);
     this.floatTexts.push(new FloatText(p.x + 8, p.y, '+' + POWERUP_SCORE, '#f8c820'));
+    this.fxEvents.push({ k: 'ft', x: p.x + 8, y: p.y, text: '+' + POWERUP_SCORE, color: '#f8c820' });
     this.audio.powerupPick();
-    const c = this.player.center();
     switch (p.type) {
       case 'star':
-        this.player.upgrade();
+        player.upgrade();
         break;
       case 'helmet':
-        this.player.giveShield();
+        player.giveShield();
         break;
       case 'grenade': {
         this.audio.grenade();
@@ -292,15 +366,16 @@ export class World {
           if (!e.alive) continue;
           e.alive = false;
           this.game.addScore(e.score);
-          this.killStats[e.type]++;
+          this.killStats[slot][e.type]++;
           const ec = e.center();
           this.explosions.push(new Explosion(ec.x, ec.y, true));
+          this.fxEvents.push({ k: 'ex', x: ec.x, y: ec.y, big: true });
           this.particles.burst(ec.x, ec.y);
         }
         break;
       }
       case 'life':
-        this.lives++;
+        this.lives[slot]++;
         this.audio.oneUp();
         break;
       case 'shovel':
@@ -340,9 +415,9 @@ export class World {
     for (const p of this.powerups) p.render(ctx, assets, this.game.engine.frame);
     for (const e of this.enemies) if (e.spawnTimer <= 0) this._shadow(ctx, e.x, e.y);
     for (const e of this.enemies) e.render(ctx, assets, this.game.engine.frame);
-    if (this.player) {
-      if (this.player.alive && this.player.spawnTimer <= 0) this._shadow(ctx, this.player.x, this.player.y);
-      this.player.render(ctx, assets, this.game.engine.frame);
+    for (const pl of this.players) {
+      if (pl.alive && pl.spawnTimer <= 0) this._shadow(ctx, pl.x, pl.y);
+      pl.render(ctx, assets, this.game.engine.frame);
     }
     for (const b of this.bullets) b.render(ctx, assets);
     for (const ex of this.explosions) ex.render(ctx, assets);
