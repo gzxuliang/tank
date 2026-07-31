@@ -26,7 +26,7 @@ body {
     gap: 12px;
 }
 
-/* 游戏画面容器：相对定位以叠加 CRT 滤镜 */
+/* 游戏画面容器 */
 #stage-wrap {
     position: relative;
     line-height: 0;
@@ -46,37 +46,9 @@ body {
     background: #000;
 }
 
-/* CRT 扫描线滤镜 */
-#stage-wrap.crt::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background:
-        repeating-linear-gradient(
-            to bottom,
-            rgba(0, 0, 0, 0) 0px,
-            rgba(0, 0, 0, 0) 2px,
-            rgba(0, 0, 0, 0.18) 3px
-        );
-    mix-blend-mode: multiply;
-}
-
-/* CRT 暗角 */
-#stage-wrap.crt::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    z-index: 2;
-    background: radial-gradient(ellipse at center,
-        rgba(0, 0, 0, 0) 55%,
-        rgba(0, 0, 0, 0.35) 100%);
-}
-
 .hint {
-    font-size: 12px;
+    font-size: 13px;
     letter-spacing: 1px;
-    color: #5a5a70;
+    color: #a8a8c0;
     user-select: none;
 }

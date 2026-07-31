@@ -127,6 +127,11 @@ const PALETTES = {
   player1: { track: '#7a5a10', tread: '#c8a030', body: '#e8b838', dark: '#6a4a08', turret: '#a0d048', accent: '#d0f080' },
   player2: { track: '#7a5a10', tread: '#c8a030', body: '#f0c848', dark: '#6a4a08', turret: '#48c0c8', accent: '#90e8f0' },
   player3: { track: '#7a5a10', tread: '#c8a030', body: '#f8d858', dark: '#6a4a08', turret: '#f07040', accent: '#ffb080' },
+  // P2 绿色系（FC 原版 2P 配色），升级后炮管变色规则与 P1 一致
+  ally0:   { track: '#1a5a10', tread: '#38a028', body: '#48b838', dark: '#144a08', turret: '#68d058', accent: '#b0f0a0' },
+  ally1:   { track: '#1a5a10', tread: '#38a028', body: '#48b838', dark: '#144a08', turret: '#a0d048', accent: '#d0f080' },
+  ally2:   { track: '#1a5a10', tread: '#38a028', body: '#58c848', dark: '#144a08', turret: '#48c0c8', accent: '#90e8f0' },
+  ally3:   { track: '#1a5a10', tread: '#38a028', body: '#68d858', dark: '#144a08', turret: '#f07040', accent: '#ffb080' },
   basic:   { track: '#5a5248', tread: '#9a9088', body: '#c8bcA0', dark: '#4a443c', turret: '#d8ccb0', accent: '#f0e8d0' },
   fast:    { track: '#606060', tread: '#b0b0b0', body: '#e0e0e0', dark: '#484848', turret: '#f0f0f0', accent: '#ffffff' },
   power:   { track: '#2a6055', tread: '#48a090', body: '#58c8a8', dark: '#1f4a40', turret: '#78d8c0', accent: '#b0f0e0' },
@@ -242,32 +247,56 @@ function drawIce() {
   });
 }
 
-// ---- 基地老鹰（16×16）----
+// ---- 基地老鹰（16×16）：仿 FC 原版的石雕鹰像，守护目标 ----
 function drawBase() {
   return makeCanvas(16, 16, (g) => {
-    // 底座
-    g.fillStyle = lgrad(g, 0, 12, 0, 16, [[0, '#9aa2ac'], [1, '#4c545e']]);
-    rr(g, 2, 12.5, 12, 3.2, 0.8); g.fill();
-    g.strokeStyle = '#2e343c'; g.lineWidth = 0.4; rr(g, 2, 12.5, 12, 3.2, 0.8); g.stroke();
-    // 翅膀（三层羽翼，对称）
-    g.fillStyle = lgrad(g, 0, 5, 0, 13, [[0, '#dfe5ec'], [1, '#8b95a1']]);
-    for (const [y, w, o] of [[6, 3, 3], [8, 4, 2], [10, 5, 1]]) {
-      rr(g, 8 - o - w + 1, y, w, 1.8, 0.7); g.fill();
-      rr(g, 8 + o - 1, y, w, 1.8, 0.7); g.fill();
+    // 石座
+    g.fillStyle = lgrad(g, 0, 13, 0, 16, [[0, '#a8b0ba'], [1, '#4e565f']]);
+    rr(g, 2.5, 13, 11, 2.8, 0.7); g.fill();
+    g.strokeStyle = '#2b3138'; g.lineWidth = 0.4; rr(g, 2.5, 13, 11, 2.8, 0.7); g.stroke();
+    // 尾羽（扇形收进石座）
+    g.fillStyle = lgrad(g, 0, 9, 0, 14, [[0, '#d4dbe4'], [1, '#79828d']]);
+    g.beginPath();
+    g.moveTo(4.6, 8.8); g.lineTo(11.4, 8.8); g.lineTo(9.6, 13.4); g.lineTo(6.4, 13.4);
+    g.closePath(); g.fill();
+    g.strokeStyle = 'rgba(38,44,52,0.6)'; g.lineWidth = 0.35;
+    for (const dx of [-1.6, 0, 1.6]) {
+      g.beginPath(); g.moveTo(8 + dx * 1.5, 9.4); g.lineTo(8 + dx * 0.9, 13); g.stroke();
     }
-    // 鹰身
-    g.fillStyle = lgrad(g, 6, 0, 10, 0, [[0, '#eef2f7'], [0.6, '#c2cad4'], [1, '#98a2ae']]);
-    rr(g, 5.8, 4.5, 4.4, 8.5, 1.6); g.fill();
-    g.strokeStyle = '#3c444e'; g.lineWidth = 0.4; rr(g, 5.8, 4.5, 4.4, 8.5, 1.6); g.stroke();
-    // 头部
-    g.fillStyle = '#f4f7fb'; circle(g, 8, 3.6, 2.1); g.fill();
-    g.strokeStyle = '#3c444e'; g.lineWidth = 0.35; circle(g, 8, 3.6, 2.1); g.stroke();
-    // 喙与眼
-    g.fillStyle = '#e8a838';
-    g.beginPath(); g.moveTo(9.2, 3.2); g.lineTo(10.8, 3.8); g.lineTo(9.2, 4.4); g.closePath(); g.fill();
-    g.fillStyle = '#20242a'; circle(g, 8.4, 3.2, 0.45); g.fill();
+    // 完全展开的双翼（翼尖三根分叉飞羽，略上扬）
+    for (const s of [-1, 1]) {
+      g.fillStyle = lgrad(g, 8, 0, 8 + s * 7, 0, [[0, '#eef2f7'], [1, '#96a0ab']]);
+      g.beginPath();
+      g.moveTo(8 + s * 1.4, 4.6);   // 肩
+      g.lineTo(8 + s * 6.9, 2.2);   // 翼尖上缘
+      g.lineTo(8 + s * 6.0, 4.4);   // 飞羽分叉
+      g.lineTo(8 + s * 6.9, 4.6);
+      g.lineTo(8 + s * 5.6, 5.8);
+      g.lineTo(8 + s * 6.3, 6.4);
+      g.lineTo(8 + s * 4.4, 7.2);   // 羽缘收回
+      g.lineTo(8 + s * 1.8, 8.6);   // 翼根
+      g.closePath(); g.fill();
+      g.strokeStyle = '#343c46'; g.lineWidth = 0.35; g.stroke();
+    }
+    // 胸（前倾）
+    g.fillStyle = lgrad(g, 6.4, 0, 9.6, 0, [[0, '#f4f7fa'], [0.6, '#c9d1db'], [1, '#949eaa']]);
+    rr(g, 6.3, 3.8, 3.4, 6, 1.5); g.fill();
+    g.strokeStyle = '#343c46'; g.lineWidth = 0.35; rr(g, 6.3, 3.8, 3.4, 6, 1.5); g.stroke();
+    // 头部（低伏前探，白首）
+    g.fillStyle = '#f7fafc'; circle(g, 8.2, 2.6, 1.9); g.fill();
+    g.strokeStyle = '#343c46'; g.lineWidth = 0.35; circle(g, 8.2, 2.6, 1.9); g.stroke();
+    // 怒眉
+    g.strokeStyle = '#343c46'; g.lineWidth = 0.5;
+    g.beginPath(); g.moveTo(7.4, 1.9); g.lineTo(9.2, 2.3); g.stroke();
+    // 眼
+    g.fillStyle = '#181c22'; g.fillRect(8, 2.4, 0.9, 0.9);
+    // 张开的钩喙
+    g.fillStyle = '#f0b030';
+    g.beginPath(); g.moveTo(9.6, 2); g.lineTo(11.6, 2.6); g.lineTo(9.9, 3.1); g.closePath(); g.fill();
+    g.fillStyle = '#d89018';
+    g.beginPath(); g.moveTo(9.7, 3.3); g.lineTo(10.9, 3.9); g.lineTo(9.6, 4); g.closePath(); g.fill();
     // 胸前高光
-    g.fillStyle = 'rgba(255,255,255,0.55)'; rr(g, 6.4, 5.4, 1, 6.5, 0.5); g.fill();
+    g.fillStyle = 'rgba(255,255,255,0.5)'; rr(g, 6.8, 4.6, 0.9, 4.2, 0.45); g.fill();
   });
 }
 
