@@ -90,6 +90,7 @@ export function applySnapshot(world, snap) {
 }
 
 // 位置平滑：客机实体带 _tx/_ty 目标坐标，渲染帧间指数趋近（30Hz 快照下消除抖动）
+// skip：本地预测的实体（客机自己的坦克）跳过平滑，由预测逻辑自行纠偏
 function lerpEntity(e, x, y, smooth) {
   if (smooth) {
     e._tx = x; e._ty = y;
@@ -102,10 +103,10 @@ function lerpEntity(e, x, y, smooth) {
 }
 
 // 每渲染帧调用：让实体坐标趋近快照目标
-export function smoothEntities(world) {
+export function smoothEntities(world, skip = null) {
   for (const list of [world.players, world.enemies]) {
     for (const e of list) {
-      if (e._tx === undefined) continue;
+      if (e === skip || e._tx === undefined) continue;
       e.x += (e._tx - e.x) * 0.4;
       e.y += (e._ty - e.y) * 0.4;
     }

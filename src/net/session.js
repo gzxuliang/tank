@@ -1,6 +1,7 @@
 // 联网会话：主机权威 + 快照同步
 // 主机（NetHostSession）：跑权威 World，P2 输入来自客机，每 2 帧广播快照
-// 客机（NetClientSession）：只发本地输入，按快照更新镜像 World 并渲染
+// 客机（NetClientSession）：发本地输入，按快照更新镜像 World 并渲染；
+// 自己的坦克做本地预测（输入即时生效，快照小幅纠偏），消除操作延迟
 import { NetInput } from '../core/input.js';
 import { serializeWorld, applySnapshot, serializeMap, applyMap, smoothEntities } from './sync.js';
 import { TitleScene } from '../scenes/title.js';
@@ -114,10 +115,52 @@ export class NetClientSession {
 
   update() {
     if (this.dead) { backToTitleWithNotice(this.game, '对方已断开连接'); return; }
-    // 每帧把本地输入发给主机（客机不跑游戏逻辑）
-    this.client.relay({ t: 'in', ...NetInput.snapshotOf(this.game.input) });
+    // 输入只在变化时发送（附 10Hz 心跳兜底），减少中转消息量
+    const snap = NetInput.snapshotOf(this.game.input);
+    const key = JSON.stringify(snap);
+    this._idleFrames = (this._idleFrames || 0) + 1;
+    if (key !== this._lastInput || this._idleFrames >= 6) {
+      this.client.relay({ t: 'in', ...snap });
+      this._lastInput = key;
+      this._idleFrames = 0;
+    }
     const world = this.scene.world;
-    smoothEntities(world);   // 位置向快照目标平滑趋近
-    world._updateFx();       // 特效动画本地推进
+    const me = world.players[1]; // 客机固定为 P2
+    this._predict(world, me);    // 本地预测自己的坦克，输入即时生效
+    smoothEntities(world, me);   // 其余实体位置向快照目标平滑趋近
+    world._updateFx();           // 特效动画本地推进
+  }
+
+  // 本地预测自己的坦克（主机仍权威）：先用快照小幅纠偏，再用本地输入驱动移动
+  _predict(world, me) {
+    if (!me || !me.alive || me.spawnTimer > 0 || world.state !== 'playing') return;
+    // 纠偏：严重不符（阵亡/重生/跨场景）直接落位，轻微偏差缓慢收敛
+    if (me._tx !== undefined) {
+      const dx = me._tx - me.x, dy = me._ty - me.y;
+      if (Math.abs(dx) > 24 || Math.abs(dy) > 24) { me.x = me._tx; me.y = me._ty; }
+      else { me.x += dx * 0.15; me.y += dy * 0.15; }
+    }
+    // 移动逻辑与 Player.update 一致；开火不做预测（子弹由主机权威生成）
+    const d = this.game.input.dirHeld();
+    if (d >= 0) {
+      me.setDir(d);
+      me.tryMove(world);
+      me.slideTimer = 0;
+      if (world.tilemap.onIce(me.x, me.y, me.w, me.h)) {
+        me.slideTimer = 8;
+        me.slideDir = d;
+      }
+    } else {
+      me.moving = false;
+      // 冰面打滑：松开后继续滑一小段
+      if (me.slideTimer > 0) {
+        me.slideTimer--;
+        me.setDir(me.slideDir);
+        const bak = me.speed;
+        me.speed = bak * 0.7;
+        me.tryMove(world);
+        me.speed = bak;
+      }
+    }
   }
 }

@@ -537,6 +537,7 @@ console.log('— 联网会话端到端 —');
   const hw = hostScene.world, cw = clientScene.world;
   check('客机输入驱动了主机世界的 P2', hw.players[1].x > 18 * 8); // P2 出生 x=144，向右移动过
   check('P2 位置经快照同步到镜像', Math.abs(cw.players[1]._tx - hw.players[1].x) < 0.001);
+  check('本地预测后镜像 P2 与主机位置收敛', Math.abs(cw.players[1].x - hw.players[1].x) < 2);
   check('镜像敌坦与主机一致', cw.enemies.length === hw.enemies.length && hw.enemies.length > 0);
   check('镜像子弹含 P2 所射', hw.bullets.some((b) => b.owner === hw.players[1]) ===
     cw.bullets.some((b) => b.isPlayerBullet));
