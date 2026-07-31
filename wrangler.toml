@@ -1,6 +1,6 @@
 # Cloudflare Worker 版部署配置（方案 3：全 serverless）
 # 部署：npm run deploy:worker（或推送 main 分支由 GitHub Actions 自动部署）
-name = "tank-battle"
+name = "tank"
 main = "worker/index.js"
 compatibility_date = "2025-06-01"
 

@@ -67,7 +67,7 @@ docker run -d --name tank -p 8000:8000 --restart unless-stopped tank
 3. 在 GitHub 仓库 Settings → Secrets and variables → Actions 添加
    `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_ACCOUNT_ID`。
 
-之后**推送 main 分支即自动部署**（`.github/workflows/deploy-worker.yml`），游戏地址为 `https://tank-battle.<你的子域>.workers.dev`，打开即可联机。
+之后**推送 main 分支即自动部署**（`.github/workflows/deploy-worker.yml`），游戏地址为 `https://tank.<你的子域>.workers.dev`，打开即可联机。
 
 手动部署（可选）：`npx wrangler login` 后执行 `npm run deploy:worker`。
 
