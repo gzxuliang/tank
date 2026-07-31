@@ -51,8 +51,9 @@ export class NetClient {
 }
 
 // 默认连接地址：优先 URL 参数 ?server=ws://host:port（合法则记住），
-// 其次 localStorage 中记住的地址，最后回退到与页面同源
-// （server.js 同端口托管静态文件与 WebSocket）
+// 其次 localStorage 中记住的地址，最后回退到与页面同源（走 /ws 路径：
+// Cloudflare 静态资源优先路由下，/ws 无对应文件才会进入 Worker → Durable Object；
+// Node 版 server.js 不校验路径，同样兼容）
 export function defaultServerUrl() {
   const param = new URLSearchParams(location.search).get('server');
   if (param && /^wss?:\/\//.test(param)) {
@@ -63,5 +64,5 @@ export function defaultServerUrl() {
   try { saved = localStorage.getItem('tank_server'); } catch { /* 忽略 */ }
   if (saved && /^wss?:\/\//.test(saved)) return saved;
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${location.host}`;
+  return `${proto}//${location.host}/ws`;
 }
