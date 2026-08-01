@@ -100,7 +100,9 @@ export class Tank {
       return;
     }
     const sprite = assets.tanks[this.paletteName()][this.dir][(this.treadFrame >> 3) & 1];
-    const px = FIELD_X + this.x, py = FIELD_Y + this.y;
+    // 联网客机的纠偏残差只影响画面，不污染移动和碰撞使用的权威坐标。
+    const px = FIELD_X + this.x + (this._visualOffsetX || 0);
+    const py = FIELD_Y + this.y + (this._visualOffsetY || 0);
     if (this.hitFlash > 0) {
       // 受击白闪
       ctx.save();

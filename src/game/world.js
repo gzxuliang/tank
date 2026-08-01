@@ -72,6 +72,9 @@ export class World {
     this.overReason = null;       // 'tank' | 'base'
     this.stateTimer = 0;
     this.lastShake = { x: 0, y: 0 };
+    // 敌人位置环形历史（P2 子弹延迟补偿：命中判定回滚到客机开火时刻）
+    this.enemyHistory = new Array(60).fill(null);
+    this.inputLag = 0;            // 客机输入延迟（帧），由主机会话写入
   }
 
   get audio() { return this.game.audio; }
@@ -93,6 +96,10 @@ export class World {
   // ---- 主更新 ----
   // inputs：与 players 对齐的输入数组（单人传 [input]，双人传 [input1, input2]）
   update(inputs) {
+    // 敌人位置历史（延迟补偿用）：按主机帧号记录，60 帧环形
+    const hf = this.game.engine.frame;
+    this.enemyHistory[hf % 60] = { hf, enemies: this.enemies.map((e) => ({ id: e.id, x: e.x, y: e.y })) };
+
     // 结算/结束状态：仅更新视觉残留
     if (this.state !== 'playing') {
       this.stateTimer--;
@@ -235,9 +242,24 @@ export class World {
     return this.tankBlocked(null, tx * TILE, ty * TILE, TILE, TILE);
   }
 
+  // 指定主机帧的敌人位置（延迟补偿判定用）；历史缺失（帧未记录）返回 null
+  enemyPosAt(frame, id) {
+    const h = this.enemyHistory[frame % 60];
+    if (!h || h.hf !== frame) return null;
+    const e = h.enemies.find((x) => x.id === id);
+    return e || null;
+  }
+
   spawnBullet(tank) {
     const b = new Bullet(tank);
     b.id = this.nextId++;
+    b.ownerId = tank.id;
+    b.bornHf = this.game.engine.frame; // 生成帧号：P2 子弹延迟补偿的基准
+    // 客机 P2 的开火命令在主机帧中带入，用于权威子弹回传时精确接管。
+    if (tank.isPlayer && tank.slot === 1 && this.pendingP2Fire) {
+      b.clientFireSeq = this.pendingP2Fire.fireSeq;
+      b.clientViewHf = this.pendingP2Fire.viewHf;
+    }
     this.bullets.push(b);
     // 炮口火光
     const m = tank.muzzle();

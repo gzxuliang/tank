@@ -4,8 +4,9 @@
 // 自己的坦克做本地预测 + 回放纠偏（快照回执已确认输入序号，倒回权威位置重放），
 // 预测准确时零跳动，消除操作延迟与漂移
 import { NetInput } from '../core/input.js';
-import { serializeWorld, applySnapshot, serializeMap, applyMap, smoothEntities } from './sync.js';
+import { serializeWorld, pushSnapshot, serializeMap, applyMap, interpolateTo } from './sync.js';
 import { TitleScene } from '../scenes/title.js';
+import { DIR_DX, DIR_DY, MAP_W, TILE } from '../core/const.js';
 
 // 需要同步给客机的音效方法
 const AUDIO_METHODS = [
@@ -16,9 +17,9 @@ const AUDIO_METHODS = [
 
 // 音频事件记录：全局只包装一次，事件累积在 game.audioEvents，由主机会话随快照带走
 function ensureAudioWrapped(game) {
+  if (!game.audioEvents) game.audioEvents = [];
   if (game.audio._netWrapped) return;
   game.audio._netWrapped = true;
-  game.audioEvents = [];
   for (const m of AUDIO_METHODS) {
     const orig = game.audio[m].bind(game.audio);
     game.audio[m] = (...a) => { game.audioEvents.push(m); orig(...a); };
@@ -41,6 +42,8 @@ export class NetHostSession {
     this.client = game.net.client;
     this.netInput = new NetInput(); // 客机玩家的输入
     this.lastSeq = 0;               // 已消费的客机输入序号
+    this.inQueue = [];              // 有序输入队列：每个权威帧只消费一条，避免突发包跳过转向
+    this.pendingP2Fire = null;      // 当前权威帧要消费的 P2 开火命令（带客户端开火编号）
     this.frame = 0;
     this.dead = false;
     this.sendMapNext = true;        // 首包快照附带全量地形
@@ -52,15 +55,36 @@ export class NetHostSession {
 
   onMessage(data) {
     if (data.t === 'in') {
-      this.netInput.applyRemote(data.held, data.edges);
-      this.lastSeq = data.seq; // 已消费的客机输入序号，随快照回执给客机做回放纠偏
+      this.inQueue.push(data); // 排队，update 开头合并消费
     } else if (data.t === 'hello') this.sendMapNext = true; // 客机进入新场景，补发全量地形
+  }
+
+  // 每个权威帧消费一条输入。WebSocket 保序，队列能把公网突发包恢复为连续的模拟帧。
+  _consumeInputs() {
+    this.pendingP2Fire = null;
+    while (this.inQueue.length) {
+      const m = this.inQueue.shift();
+      if (!m || typeof m.seq !== 'number' || m.seq <= this.lastSeq) continue;
+      this.netInput.applyRemote(m.held || {}, m.edges || {});
+      this.lastSeq = m.seq; // 只确认本帧真实拿来模拟的输入序号
+      if (m.edges && m.edges.fire && typeof m.fireSeq === 'number') {
+        this.pendingP2Fire = { fireSeq: m.fireSeq, viewHf: m.viewHf };
+      }
+      if (typeof m.viewHf === 'number' && this.scene.world) {
+        this.scene.world.inputLag = Math.max(0, Math.min(30, this.game.engine.frame - m.viewHf));
+      }
+      break;
+    }
   }
 
   update() {
     if (this.dead) { backToTitleWithNotice(this.game, '对方已断开连接'); return; }
+    this._consumeInputs();
     const world = this.scene.world;
+    world.pendingP2Fire = this.pendingP2Fire;
     world.update([this.game.input, this.netInput]);
+    world.pendingP2Fire = null;
+    this.pendingP2Fire = null;
     this.netInput.postUpdate();
     this.frame++;
     if (this.frame % 2 === 0) this.broadcast();
@@ -69,7 +93,13 @@ export class NetHostSession {
   // 主机暂停中：低频心跳，让客机同步显示暂停遮罩
   updatePaused() {
     if (this.dead) { backToTitleWithNotice(this.game, '对方已断开连接'); return; }
+    this._consumeInputs(); // 暂停也消费，保持 lastSeq 新鲜（恢复后客机重放窗口不膨胀）
     if (this.frame++ % 30 === 0) this.broadcast();
+  }
+
+  // 顿帧期间：广播快照（内容不变，hf 推进），客机插值缓冲不断流
+  onHitstop() {
+    if (!this.dead) this.broadcast();
   }
 
   broadcast() {
@@ -96,8 +126,16 @@ export class NetClientSession {
     this.isHost = false;
     this.client = game.net.client;
     this.dead = false;
+    this.fireSeq = 0;          // 本地开火编号：用于精确接管预测子弹
     this.seq = 0;              // 本地输入帧序号（随输入发出，主机随快照回执）
     this.history = new Map();  // seq → 输入快照，回放纠偏用
+    this.lastHf = 0;           // 收到的最新快照主机帧号（随输入回告主机，延迟补偿用）
+    this._renderHf = undefined;
+    this._interpDelay = 6;     // 约 100ms 的初始插值缓冲，按网络抖动自适应增加
+    this._jitterFrames = 0;
+    this._lastSnapLocalFrame = 0;
+    this._lastSnapHf = undefined;
+    this._localFireFrames = 0; // 本地开火后的音效抑制窗口（防主机回传 shoot 双响）
     this.client.on('relay', (m) => this.onMessage(m.data)); // 服务器外层包装为 {t:'relay', data}
     this.client.on('peer-left', () => { this.dead = true; });
     this.client.on('close', () => { this.dead = true; });
@@ -111,9 +149,20 @@ export class NetClientSession {
     if (data.t === 'map') {
       applyMap(world.tilemap, data);
     } else if (data.t === 'snap') {
-      applySnapshot(world, data);
+      this.lastHf = data.hf; // 记录最新主机帧号（随输入回告，主机算输入延迟）
+      const localFrame = this.game.engine.frame;
+      if (this._lastSnapHf !== undefined) {
+        const expected = data.hf - this._lastSnapHf;
+        const actual = localFrame - this._lastSnapLocalFrame;
+        this._jitterFrames = this._jitterFrames * 0.85 + Math.abs(actual - expected) * 0.15;
+        this._interpDelay = Math.max(6, Math.min(18, 6 + Math.ceil(this._jitterFrames * 2)));
+      }
+      this._lastSnapLocalFrame = localFrame;
+      this._lastSnapHf = data.hf;
+      pushSnapshot(world, data, 1); // 客机固定为 P2（slot 1）：瞬时应用 + 快照入队（插值缓冲）
       this._reconcile(world, data.ack); // 回放式纠偏自己的坦克
       for (const m of data.ev || []) {
+        if (m === 'shoot' && this._localFireFrames > 0) continue; // 本地已播过开火音（防双响）
         if (this.game.audio[m]) this.game.audio[m]();
       }
       this.scene.paused = !!data.ps; // 跟随主机暂停（仅显示遮罩，不阻塞快照处理）
@@ -125,21 +174,46 @@ export class NetClientSession {
     if (this.dead) { backToTitleWithNotice(this.game, '对方已断开连接'); return; }
     // 每帧发输入并记录历史（主机回执序号后用于回放纠偏）
     const held = { ...this.game.input.state };
+    const edges = { ...this.game.input.pressedSet };
+    const fireSeq = edges.fire ? ++this.fireSeq : null;
     this.seq++;
     this.history.set(this.seq, held);
     if (this.history.size > 180) this.history.delete(this.seq - 180); // 只留 3 秒
-    this.client.relay({ t: 'in', seq: this.seq, held, edges: { ...this.game.input.pressedSet } });
+    // viewHf 是玩家真正看到的远端时间，不是最新到包时间；用于开火回滚判定。
+    const viewHf = this._renderHf === undefined ? this.lastHf : Math.floor(this._renderHf);
+    this.client.relay({ t: 'in', seq: this.seq, held, edges, fireSeq, viewHf });
     const world = this.scene.world;
     const me = world.players[1]; // 客机固定为 P2
-    this._applyInput(world, me, held); // 本地预测：输入即时生效
-    smoothEntities(world, me);         // 其余实体位置向快照目标平滑趋近
+    if (this._localFireFrames > 0) this._localFireFrames--;
+    if (me) {
+      // 每逻辑帧最多消化 0.7px 纠偏残差：正常移动速度为 1.3px，持续前进时不会视觉倒退。
+      const settle = (v) => Math.abs(v) <= 0.7 ? 0 : v - Math.sign(v) * 0.7;
+      me._visualOffsetX = settle(me._visualOffsetX || 0);
+      me._visualOffsetY = settle(me._visualOffsetY || 0);
+    }
+    this._applyInput(world, me, held, edges, fireSeq); // 本地预测：输入即时生效 + 开火预测
+    // 远端实体始终保留一段自适应缓冲。不追到最新快照，避免公网抖动时冻结后跳变。
+    const buf = world._snapBuffer;
+    if (buf && buf.length) {
+      const latest = buf[buf.length - 1].hf;
+      const oldest = buf[0].hf;
+      const target = latest - this._interpDelay;
+      if (this._renderHf === undefined || this._renderHf < oldest) this._renderHf = Math.max(oldest, target);
+      else this._renderHf = Math.min(target, this._renderHf + 1);
+      interpolateTo(world, this._renderHf, 1);
+    }
+    this._advanceLocalBullets(world); // 本地预测子弹推进（直线 + 地形碰撞）
     world._updateFx();                 // 特效动画本地推进
   }
 
-  // 用一帧输入驱动自己的坦克（移动逻辑与 Player.update 一致；
-  // 开火不做预测，子弹由主机权威生成）。预测与回放共用。
-  _applyInput(world, me, held) {
-    if (!me || !me.alive || me.spawnTimer > 0 || world.state !== 'playing') return;
+  // 用一帧输入驱动自己的坦克（移动逻辑与 Player.update 一致）。
+  // fire：本帧按下沿（预测时传真实 pressedSet，回放时传空——重放不重复开火）。
+  // 开火本地预测：立即生成子弹（负数 id，权威接管前不被快照匹配）+ 音效，
+  // 消除公网下「按 fire 后 2×RTT 才有反馈」的延迟感；命中判定仍由主机权威负责
+  _applyInput(world, me, held, fire, fireSeq = null) {
+    if (!me || !me.alive || world.state !== 'playing') return;
+    me.tickTimers();
+    if (me.spawnTimer > 0) return;
     const d = held.up ? 0 : held.right ? 1 : held.down ? 2 : held.left ? 3 : -1;
     if (d >= 0) {
       me.setDir(d);
@@ -161,19 +235,60 @@ export class NetClientSession {
         me.speed = bak;
       }
     }
+    // 本地开火预测（按住仅首帧按下沿生效，与本地单人规则一致）
+    if (fire && fire.fire && me.canFire(world)) {
+      world.spawnBullet(me);
+      const b = world.bullets[world.bullets.length - 1];
+      b.id = -1000 - this.seq; // 本地预测子弹：负数 id，权威快照永不匹配
+      b.ownerId = me.id;
+      b.clientFireSeq = fireSeq;
+      b.localPredicted = true;
+      world.audio.shoot(); // 本地立即播（客机 audio 未包装，不产生事件）
+      this._localFireFrames = 12; // 抑制主机回传的 shoot 事件（防双响）
+    }
   }
 
-  // 回放式纠偏：把坐标倒回快照（=主机已确认 ack 输入时的权威位置），
-  // 再把 ack 之后的本地输入逐帧重放。预测准确时结果与当前一致，无跳动；
-  // 只在预测与主机真实分歧（碰撞差异/阵亡/重生）时才被拉回
+  // 本地预测子弹推进：直线飞行 + 地形/边界碰撞（不做坦克碰撞，命中由主机权威判定）。
+  // 权威子弹按开火编号接管后继续沿本地预测轨迹展示，直到主机快照确认其结束。
+  _advanceLocalBullets(world) {
+    for (const b of world.bullets) {
+      if (!b.localPredicted) continue; // 只看本地预测子弹（确认后仍由本地平滑展示）
+      b._age = (b._age || 0) + 1;
+      if (b._age > 60) { b.alive = false; continue; } // 防御：权威未生成时超时消失
+      const steps = Math.ceil(b.speed);
+      for (let i = 0; i < steps && b.alive; i++) {
+        b.x += DIR_DX[b.dir] * (b.speed / steps);
+        b.y += DIR_DY[b.dir] * (b.speed / steps);
+        if (b.x < 0 || b.x > MAP_W * TILE || b.y < 0 || b.y > MAP_W * TILE) {
+          world.bulletExplode(b, false);
+          break;
+        }
+        const r = b.hitRect();
+        // 客机预测不能改动权威镜像地图；只作只读碰撞预览。
+        const hit = world.tilemap.bulletHit(r.x, r.y, r.w, r.h, b.power, false);
+        if (hit.result) { world.bulletExplode(b, false); break; }
+      }
+    }
+    world.bullets = world.bullets.filter((b) => b.alive);
+  }
+
+  // 回放式纠偏：ack 是主机刚收到的输入，而快照到客机还要经过一个单程延迟。
+  // 因此只重放到快照抵达时应有的客户端时间，避免把同一段 RTT 模拟两次。
+  // 物理坐标立即正确；画面残差单独衰减，不能把不同时间点的坐标拿来反复折中。
   _reconcile(world, ack) {
     const me = world.players[1];
     if (!me || ack === undefined || me._tx === undefined) return;
+    const oneWay = Math.max(0, Math.round((this.seq - ack) / 2));
+    const screenX = me.x + (me._visualOffsetX || 0);
+    const screenY = me.y + (me._visualOffsetY || 0);
     me.x = me._tx; me.y = me._ty; // 倒回权威坐标
-    for (let s = ack + 1; s <= this.seq; s++) {
+    const end = this.seq - oneWay;
+    for (let s = ack + 1; s <= end; s++) {
       const held = this.history.get(s);
       if (!held) break;           // 历史不足（超大延迟），直接用快照坐标
       this._applyInput(world, me, held);
     }
+    me._visualOffsetX = screenX - me.x;
+    me._visualOffsetY = screenY - me.y;
   }
 }

@@ -129,13 +129,13 @@ export class TileMap {
   // ---- 子弹命中地形 ----
   // hitRect：战场局部坐标；power>=3 可破钢
   // 返回 { result: 'brick'|'steel'|'base'|null }
-  bulletHit(hx, hy, hw, hh, power) {
+  bulletHit(hx, hy, hw, hh, power, apply = true) {
     // 基地判定优先
     const b = this.baseRect();
     const bx = b.x - FIELD_X, by = b.y - FIELD_Y;
     if (this.baseAlive &&
         hx < bx + b.w && hx + hw > bx && hy < by + b.h && hy + hh > by) {
-      this.destroyBase();
+      if (apply) this.destroyBase();
       return { result: 'base' };
     }
     const x0 = Math.floor(hx / TILE), x1 = Math.floor((hx + hw - 0.01) / TILE);
@@ -148,14 +148,18 @@ export class TileMap {
         const c = this.cells[i];
         if (c === T.BRICK && this.brickMask[i] !== 0) {
           // 整格破坏：一两发即可打出坦克可通行的缺口
-          this.brickMask[i] = 0;
-          this.cells[i] = T.EMPTY;
-          this._dirty = true;
+          if (apply) {
+            this.brickMask[i] = 0;
+            this.cells[i] = T.EMPTY;
+            this._dirty = true;
+          }
           hitBrick = true;
         } else if (c === T.STEEL) {
           if (power >= 3) {
-            this.cells[i] = T.EMPTY;
-            this._dirty = true;
+            if (apply) {
+              this.cells[i] = T.EMPTY;
+              this._dirty = true;
+            }
             hitBrick = true; // 破钢的打击感按砖墙处理
           } else {
             hitSteel = true;

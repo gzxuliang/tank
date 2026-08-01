@@ -1,5 +1,5 @@
 // 子弹：分段步进检测，命中地形/坦克/边界；对向子弹互相抵消在 world 中处理
-import { DIR_DX, DIR_DY, BULLET_SIZE, FIELD_X, FIELD_Y, MAP_W, MAP_H, TILE } from '../core/const.js';
+import { DIR_DX, DIR_DY, BULLET_SIZE, TANK_SIZE, FIELD_X, FIELD_Y, MAP_W, MAP_H, TILE } from '../core/const.js';
 import { blit } from '../core/assets.js';
 
 const FIELD_LIMIT = MAP_W * TILE; // 208
@@ -64,9 +64,19 @@ export class Bullet {
     }
     // 坦克
     if (this.isPlayerBullet) {
+      // P2 子弹延迟补偿：客机「看到什么打什么」——命中判定回滚到客机开火时刻的敌人位置。
+      // P1 子弹（本机无延迟）与敌人子弹不补偿
+      const lag = this.owner && this.owner.slot === 1 ? (world.inputLag || 0) : 0;
+      // 优先使用开火时客机实际渲染的主机帧；旧协议再回退到延迟估算。
+      const backFrame = typeof this.clientViewHf === 'number' ? this.clientViewHf : this.bornHf - lag;
       for (const e of world.enemies) {
         if (!e.alive || e.spawnTimer > 0) continue;
-        if (this._overlaps(e)) {
+        let ox = e.x, oy = e.y;
+        if (lag > 0) {
+          const hp = world.enemyPosAt(backFrame, e.id);
+          if (hp) { ox = hp.x; oy = hp.y; } // 历史缺失时回退当前
+        }
+        if (this._overlapsAt(ox, oy)) {
           world.bulletExplode(this, false);
           world.enemyHit(e, this);
           return;
@@ -85,9 +95,13 @@ export class Bullet {
   }
 
   _overlaps(t) {
+    return this._overlapsAt(t.x, t.y);
+  }
+
+  _overlapsAt(x, y) {
     const s = BULLET_SIZE / 2;
-    return this.x + s > t.x && this.x - s < t.x + t.w &&
-           this.y + s > t.y && this.y - s < t.y + t.h;
+    return this.x + s > x && this.x - s < x + TANK_SIZE &&
+           this.y + s > y && this.y - s < y + TANK_SIZE;
   }
 
   render(ctx, assets) {

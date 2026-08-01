@@ -25,6 +25,7 @@ export class Engine {
     this.frame = 0;             // 全局帧计数（动画用）
     this.hitstop = 0;           // 顿帧剩余
     this.paused = false;
+    this._rafScheduled = false;
 
     this.STEP = 1000 / 60;
     this._loop = this._loop.bind(this);
@@ -39,11 +40,35 @@ export class Engine {
   addHitstop(frames) { this.hitstop = Math.max(this.hitstop, frames); }
 
   start() {
-    requestAnimationFrame(this._loop);
+    this._scheduleRaf();
+    // 后台标签页 rAF 停止（Chrome 隐藏标签节流），用固定间隔兜底驱动，
+    // 保证联网主机的广播与客机渲染在窗口切走时不断
+    if (document.addEventListener) {
+      const sync = () => {
+        if (document.hidden) {
+          clearInterval(this._bgTimer);
+          this._bgTimer = setInterval(() => this._loop(performance.now()), 16.7);
+        } else {
+          clearInterval(this._bgTimer);
+        }
+      };
+      document.addEventListener('visibilitychange', sync);
+      if (document.hidden) sync(); // 页面以后台方式打开时立即启用兜底
+    }
+  }
+
+  // 前台 rAF 与后台定时器共用同一个调度闸门，防止切回页面后积累多个 rAF 主循环。
+  _scheduleRaf() {
+    if (this._rafScheduled) return;
+    this._rafScheduled = true;
+    requestAnimationFrame((now) => {
+      this._rafScheduled = false;
+      this._loop(now);
+    });
   }
 
   _loop(now) {
-    requestAnimationFrame(this._loop);
+    this._scheduleRaf();
     if (!this.last) this.last = now;
     let dt = now - this.last;
     this.last = now;
@@ -75,7 +100,12 @@ export class Engine {
       if (this.scene.enter) this.scene.enter();
     }
     this.frame++;
-    if (this.hitstop > 0) { this.hitstop--; return; } // 顿帧期间逻辑暂停
+    if (this.hitstop > 0) {
+      this.hitstop--;
+      // 顿帧期间仍通知场景（联网主机需继续广播快照，保证客机插值缓冲不断流）
+      if (this.scene && this.scene.onHitstop) this.scene.onHitstop();
+      return;
+    } // 顿帧期间逻辑暂停
     if (this.scene && this.scene.update) this.scene.update();
   }
 

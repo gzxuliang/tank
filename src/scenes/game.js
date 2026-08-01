@@ -72,6 +72,11 @@ export class GameScene {
     }
   }
 
+  // 引擎顿帧期间调用：主机仍需广播快照（帧号推进），保证客机插值缓冲不断流
+  onHitstop() {
+    if (this.session && this.session.isHost) this.session.onHitstop();
+  }
+
   update() {
     const input = this.game.input;
 
