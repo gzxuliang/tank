@@ -42,7 +42,10 @@ export class NetHostSession {
     this.client = game.net.client;
     this.netInput = new NetInput(); // 客机玩家的输入
     this.lastSeq = 0;               // 已消费的客机输入序号
-    this.inQueue = [];              // 有序输入队列：每个权威帧只消费一条，避免突发包跳过转向
+    this.inQueue = [];              // 输入状态队列：每帧追到最新状态，避免公网突发包永久积压
+    this.fireQueue = [];            // 开火按下沿单独排队，移动状态合并时也不能丢
+    this.lastQueuedFireSeq = 0;
+    this.lastFireSeq = 0;           // 已由权威逻辑处理的开火编号
     this.pendingP2Fire = null;      // 当前权威帧要消费的 P2 开火命令（带客户端开火编号）
     this.frame = 0;
     this.dead = false;
@@ -59,21 +62,35 @@ export class NetHostSession {
     } else if (data.t === 'hello') this.sendMapNext = true; // 客机进入新场景，补发全量地形
   }
 
-  // 每个权威帧消费一条输入。WebSocket 保序，队列能把公网突发包恢复为连续的模拟帧。
-  _consumeInputs() {
+  // 移动是“当前按住状态”，同一权威帧收到多包时直接追到最新一包；
+  // fire 是一次性事件，必须单独排队。这样网络突发不会形成永远追不完的输入积压。
+  _consumeInputs(allowFire = true) {
     this.pendingP2Fire = null;
+    let latest = null;
+    let highestSeq = this.lastSeq;
     while (this.inQueue.length) {
       const m = this.inQueue.shift();
-      if (!m || typeof m.seq !== 'number' || m.seq <= this.lastSeq) continue;
-      this.netInput.applyRemote(m.held || {}, m.edges || {});
-      this.lastSeq = m.seq; // 只确认本帧真实拿来模拟的输入序号
-      if (m.edges && m.edges.fire && typeof m.fireSeq === 'number') {
-        this.pendingP2Fire = { fireSeq: m.fireSeq, viewHf: m.viewHf };
+      if (!m || typeof m.seq !== 'number' || m.seq <= highestSeq) continue;
+      highestSeq = m.seq;
+      latest = m;
+      if (m.edges && m.edges.fire && typeof m.fireSeq === 'number' &&
+          m.fireSeq > this.lastQueuedFireSeq) {
+        this.fireQueue.push({ fireSeq: m.fireSeq, viewHf: m.viewHf });
+        this.lastQueuedFireSeq = m.fireSeq;
       }
-      if (typeof m.viewHf === 'number' && this.scene.world) {
-        this.scene.world.inputLag = Math.max(0, Math.min(30, this.game.engine.frame - m.viewHf));
+    }
+    if (latest) {
+      this.netInput.applyRemote(latest.held || {}, {});
+      this.lastSeq = latest.seq;
+      if (typeof latest.viewHf === 'number' && this.scene.world) {
+        this.scene.world.inputLag = Math.max(0, Math.min(30, this.game.engine.frame - latest.viewHf));
       }
-      break;
+    } else {
+      this.netInput.pressedSet = {};
+    }
+    if (allowFire && this.fireQueue.length) {
+      this.pendingP2Fire = this.fireQueue.shift();
+      this.netInput.pressedSet.fire = true;
     }
   }
 
@@ -83,6 +100,7 @@ export class NetHostSession {
     const world = this.scene.world;
     world.pendingP2Fire = this.pendingP2Fire;
     world.update([this.game.input, this.netInput]);
+    if (this.pendingP2Fire) this.lastFireSeq = this.pendingP2Fire.fireSeq;
     world.pendingP2Fire = null;
     this.pendingP2Fire = null;
     this.netInput.postUpdate();
@@ -93,7 +111,7 @@ export class NetHostSession {
   // 主机暂停中：低频心跳，让客机同步显示暂停遮罩
   updatePaused() {
     if (this.dead) { backToTitleWithNotice(this.game, '对方已断开连接'); return; }
-    this._consumeInputs(); // 暂停也消费，保持 lastSeq 新鲜（恢复后客机重放窗口不膨胀）
+    this._consumeInputs(false); // 暂停只更新按住状态，开火事件留到恢复后的权威帧处理
     if (this.frame++ % 30 === 0) this.broadcast();
   }
 
@@ -113,6 +131,7 @@ export class NetHostSession {
       ev: this.game.audioEvents.splice(0),
       ps: this.scene.paused,
       ack: this.lastSeq, // 回执：客机据此把预测坐标倒回快照点再重放
+      fAck: this.lastFireSeq, // 开火独立回执：不能拿输入帧编号判断预测子弹是否被处理
     });
     world.fxEvents = []; // 事件已随快照带走
     this.client.relay(snap);
@@ -135,6 +154,7 @@ export class NetClientSession {
     this._jitterFrames = 0;
     this._lastSnapLocalFrame = 0;
     this._lastSnapHf = undefined;
+    this._rttFrames = undefined; // 输入发送到权威确认再返回的平滑 RTT（客户端逻辑帧）
     this._localFireFrames = 0; // 本地开火后的音效抑制窗口（防主机回传 shoot 双响）
     this.client.on('relay', (m) => this.onMessage(m.data)); // 服务器外层包装为 {t:'relay', data}
     this.client.on('peer-left', () => { this.dead = true; });
@@ -185,13 +205,10 @@ export class NetClientSession {
     const world = this.scene.world;
     const me = world.players[1]; // 客机固定为 P2
     if (this._localFireFrames > 0) this._localFireFrames--;
-    if (me) {
-      // 每逻辑帧最多消化 0.7px 纠偏残差：正常移动速度为 1.3px，持续前进时不会视觉倒退。
-      const settle = (v) => Math.abs(v) <= 0.7 ? 0 : v - Math.sign(v) * 0.7;
-      me._visualOffsetX = settle(me._visualOffsetX || 0);
-      me._visualOffsetY = settle(me._visualOffsetY || 0);
-    }
+    const visualX = me ? me.x + (me._visualOffsetX || 0) : 0;
+    const visualY = me ? me.y + (me._visualOffsetY || 0) : 0;
     this._applyInput(world, me, held, edges, fireSeq); // 本地预测：输入即时生效 + 开火预测
+    if (me) this._settleVisualCorrection(me, held, visualX, visualY);
     // 远端实体始终保留一段自适应缓冲。不追到最新快照，避免公网抖动时冻结后跳变。
     const buf = world._snapBuffer;
     if (buf && buf.length) {
@@ -204,6 +221,21 @@ export class NetClientSession {
     }
     this._advanceLocalBullets(world); // 本地预测子弹推进（直线 + 地形碰撞）
     world._updateFx();                 // 特效动画本地推进
+  }
+
+  // 缓慢消化纠偏残差；持续按住方向时，纠偏最多让画面停住，绝不反向拉回。
+  _settleVisualCorrection(me, held, beforeX, beforeY) {
+    const settle = (v) => Math.abs(v) <= 0.7 ? 0 : v - Math.sign(v) * 0.7;
+    me._visualOffsetX = settle(me._visualOffsetX || 0);
+    me._visualOffsetY = settle(me._visualOffsetY || 0);
+    const d = held.up ? 0 : held.right ? 1 : held.down ? 2 : held.left ? 3 : -1;
+    if (d < 0) return;
+    const afterX = me.x + me._visualOffsetX;
+    const afterY = me.y + me._visualOffsetY;
+    const progress = (afterX - beforeX) * DIR_DX[d] + (afterY - beforeY) * DIR_DY[d];
+    if (progress >= 0) return;
+    me._visualOffsetX += (beforeX - afterX) * Math.abs(DIR_DX[d]);
+    me._visualOffsetY += (beforeY - afterY) * Math.abs(DIR_DY[d]);
   }
 
   // 用一帧输入驱动自己的坦克（移动逻辑与 Player.update 一致）。
@@ -272,17 +304,21 @@ export class NetClientSession {
     world.bullets = world.bullets.filter((b) => b.alive);
   }
 
-  // 回放式纠偏：ack 是主机刚收到的输入，而快照到客机还要经过一个单程延迟。
-  // 因此只重放到快照抵达时应有的客户端时间，避免把同一段 RTT 模拟两次。
-  // 物理坐标立即正确；画面残差单独衰减，不能把不同时间点的坐标拿来反复折中。
+  // 回放式纠偏：权威位置已经是主机生成快照时的当前状态，只需补上快照回程期间的输入。
+  // seq-ack 近似完整 RTT，取平滑后的一半作为回程帧数；直接重放完整 RTT 会把去程重复计算，
+  // 尤其会在出生结束或碰撞附近造成大幅前后跳。
   _reconcile(world, ack) {
     const me = world.players[1];
     if (!me || ack === undefined || me._tx === undefined) return;
-    const oneWay = Math.max(0, Math.round((this.seq - ack) / 2));
+    const sampleRtt = Math.max(0, this.seq - ack);
+    this._rttFrames = this._rttFrames === undefined
+      ? sampleRtt
+      : this._rttFrames * 0.85 + sampleRtt * 0.15;
+    const oneWay = Math.max(0, Math.round(this._rttFrames / 2));
+    const end = Math.max(ack, this.seq - oneWay);
     const screenX = me.x + (me._visualOffsetX || 0);
     const screenY = me.y + (me._visualOffsetY || 0);
     me.x = me._tx; me.y = me._ty; // 倒回权威坐标
-    const end = this.seq - oneWay;
     for (let s = ack + 1; s <= end; s++) {
       const held = this.history.get(s);
       if (!held) break;           // 历史不足（超大延迟），直接用快照坐标

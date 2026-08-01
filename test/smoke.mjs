@@ -571,7 +571,15 @@ console.log('— 联网预测子弹协议 —');
   local.clientFireSeq = 7;
   local.localPredicted = true;
   w.bullets.push(local);
-  const snap = serializeWorld(w, { ack: 7 });
+  // 输入 ack 与开火编号是两套序号：主机尚未处理 fireSeq=7 时，
+  // 即使输入 ack 已经很大，也不能提前撤销本地预测子弹。
+  const waiting = serializeWorld(w, { ack: 90, fAck: 6 });
+  waiting.hf = 18;
+  waiting.bu = [];
+  pushSnapshot(w, waiting, 1);
+  check('输入 ack 不会误撤销尚未处理的预测子弹', w.bullets.includes(local));
+
+  const snap = serializeWorld(w, { ack: 100, fAck: 7 });
   snap.hf = 20;
   // 首先到达 P1 子弹，不能错误接管 P2 的预测子弹；随后才是同 fireSeq 的 P2 权威子弹。
   snap.bu = [
@@ -589,8 +597,8 @@ console.log('— 联网预测子弹协议 —');
   check('预测子弹地形预览不改动镜像地图',
     w.tilemap.cells[cell] === T.BRICK && w.tilemap.brickMask[cell] === 0b1111);
 
-  // ack 已越过该开火编号但不再有对应权威子弹，说明开火被拒绝或已命中，应撤销预测残影。
-  const gone = serializeWorld(w, { ack: 8 });
+  // fireAck 已越过该开火编号但不再有对应权威子弹，说明开火被拒绝或已命中，应撤销预测残影。
+  const gone = serializeWorld(w, { ack: 110, fAck: 8 });
   gone.hf = 22;
   gone.bu = [{ id: 50, x: 34, y: 30, dir: 1, spd: 2, pow: 1, isP: true, own: p1.id }];
   pushSnapshot(w, gone, 1);
@@ -656,7 +664,8 @@ console.log('— 联网预测抗延迟 —');
       hostGame.input.applyRemote({}, {});
       hostGame.engine.frame++;
       clientGame.engine.frame++;
-      hostSess.update();
+      // 模拟主机偶发 6 帧卡顿：期间 WebSocket 输入继续到达，恢复后不能永久积压。
+      if (f < 90 || f >= 96) hostSess.update();
       clientSess.update();
       for (let i = queue.length - 1; i >= 0; i--) { // 投递到期消息
         if (queue[i].at <= tick) { queue[i].fn(); queue.splice(i, 1); }
@@ -674,7 +683,7 @@ console.log('— 联网预测抗延迟 —');
     Math.abs(clientScene.world.players[1].x - hostScene.world.players[1].x) < 3);
   // 视觉残差独立衰减，物理纠偏不再把坦克画面反复拉回。
   check('挡路敌人下镜像 P2 无 >10px 视觉跳变', maxJump <= 10);
-  check('移动中镜像 P2 无明显倒退（不漂移）', maxBacktrack < 3);
+  check('移动中镜像 P2 不倒退（不漂移）', maxBacktrack < 0.05);
 }
 
 // ---- 联网输入合并：同帧多条输入不丢 fire 按下沿（公网消息突发时必现） ----
@@ -696,15 +705,14 @@ console.log('— 联网输入合并 —');
 
   const p2 = hostScene.world.players[1];
   p2.spawnTimer = 0; // 出生动画结束，确保可开火
-  // 同帧两条输入：必须按序逐帧消费，第一条的 fire 编号不能被第二条覆盖。
+  // 同帧两条输入：移动状态应追到最新一条，同时保留前一条的 fire 按下沿。
   hostSess.onMessage({ t: 'in', seq: 1, held: {}, edges: { fire: true }, fireSeq: 9, viewHf: 1 });
   hostSess.onMessage({ t: 'in', seq: 2, held: {}, edges: {} });
   hostGame.engine.frame++;
   hostSess.update();
   check('突发输入按序消费且 fire 沿不丢', hostScene.world.bullets.some((b) => b.owner === p2 && b.clientFireSeq === 9));
-  hostGame.engine.frame++;
-  hostSess.update();
-  check('下一权威帧再确认队列后一条输入', hostSess.lastSeq === 2);
+  check('突发输入同一权威帧追到最新状态', hostSess.lastSeq === 2);
+  check('开火事件使用独立确认序号', hostSess.lastFireSeq === 9);
 }
 
 // ---- 快照插值缓冲：两帧线性插值，自己的 P2 不走插值 ----

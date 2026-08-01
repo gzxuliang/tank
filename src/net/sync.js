@@ -85,7 +85,7 @@ export function pushSnapshot(world, snap, selfSlot) {
   syncPlayers(world, snap.pl, selfSlot);
   syncEnemies(world, snap.en);
   const self = selfSlot === undefined ? null : world.players.find((p) => p.slot === selfSlot);
-  syncBullets(world, snap.bu, self && self.id, snap.ack);
+  syncBullets(world, snap.bu, self && self.id, snap.fAck);
   syncPowerups(world, snap.pu);
 
   // 视觉事件：爆炸/飘字在客机本地重建（粒子本地生成）
@@ -222,7 +222,7 @@ function syncEnemies(world, list) {
   world.enemies = world.enemies.filter((e) => list.some((s) => s.id === e.id));
 }
 
-function syncBullets(world, list, selfId, ack) {
+function syncBullets(world, list, selfId, fireAck) {
   for (const s of list) {
     let b = world.bullets.find((bu) => bu.id === s.id);
     if (!b) {
@@ -247,11 +247,12 @@ function syncBullets(world, list, selfId, ack) {
     b.owner = world.players.find((p) => p.id === s.own) || null;
     b.alive = true;
   }
-  // 已被主机确认却未出现在快照中的本地预测子弹，表示被拒绝或已命中，应立即撤销。
-  if (selfId !== undefined && typeof ack === 'number') {
+  // 开火事件已被主机处理，却没有对应权威子弹：表示被拒绝或已经命中，应立即撤销。
+  // fireAck 与 fireSeq 属于同一序号空间；输入 ack 不能用于这里，否则公网下会提前删首发子弹。
+  if (selfId !== undefined && typeof fireAck === 'number') {
     for (const b of world.bullets) {
       if (b.localPredicted && b.ownerId === selfId && typeof b.clientFireSeq === 'number' &&
-          b.clientFireSeq <= ack && !list.some((s) => s.own === selfId && s.fs === b.clientFireSeq)) {
+          b.clientFireSeq <= fireAck && !list.some((s) => s.own === selfId && s.fs === b.clientFireSeq)) {
         b.alive = false;
       }
     }
