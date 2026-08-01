@@ -547,6 +547,69 @@ console.log('— 联网会话端到端 —');
     cw.tilemap.brickMask.every((v, i) => v === hw.tilemap.brickMask[i]));
 }
 
+// ---- 联网预测抗延迟：单向延迟 12 帧（≈200ms）下客机不漂移 ----
+console.log('— 联网预测抗延迟 —');
+{
+  const { World } = await import('../src/game/world.js');
+  const { NetInput } = await import('../src/core/input.js');
+  const { NetClient } = await import('../src/net/client.js');
+  const { NetHostSession, NetClientSession } = await import('../src/net/session.js');
+
+  const D = 12; // 单向延迟 12 帧
+  let tick = 0;
+  const queue = []; // 延迟投递队列
+  let hostH = null, clientH = null;
+  const hostNet = new NetClient('mem', (u, h) => {
+    hostH = h;
+    return { send: (s) => queue.push({ at: tick + D, fn: () => clientH && clientH.message(s) }), close: () => {} };
+  });
+  const clientNet = new NetClient('mem', (u, h) => {
+    clientH = h;
+    return { send: (s) => queue.push({ at: tick + D, fn: () => hostH && hostH.message(s) }), close: () => {} };
+  });
+  hostNet.connect(); clientNet.connect();
+
+  const hostGame = Object.create(game);
+  hostGame.mode = 'net-host';
+  hostGame.playerLevels = [0, 0]; hostGame.lives = [3, 3]; hostGame.score = 0;
+  hostGame.input = new NetInput();
+  hostGame.net = { client: hostNet };
+  hostGame.audioEvents = []; // 音频包装全局只初始化一次（见上一个联网用例），这里手动补
+  const hostScene = { world: new World(hostGame, 0), stageIndex: 0, paused: false };
+
+  const clientGame = Object.create(game);
+  clientGame.mode = 'net-client';
+  clientGame.playerLevels = [0, 0]; clientGame.lives = [3, 3]; clientGame.score = 0;
+  clientGame.input = new NetInput();
+  clientGame.net = { client: clientNet };
+  const clientScene = { world: new World(clientGame, 0), stageIndex: 0, paused: false };
+
+  const hostSess = new NetHostSession(hostGame, hostScene);
+  const clientSess = new NetClientSession(clientGame, clientScene);
+
+  let err = null, maxBacktrack = 0, prevX = -1;
+  try {
+    for (let f = 0; f < 360; f++) {
+      tick = f;
+      clientGame.input.applyRemote(f < 180 ? { right: true } : {}, {}); // 前 180 帧按住向右
+      hostGame.input.applyRemote({}, {});
+      hostSess.update();
+      clientSess.update();
+      for (let i = queue.length - 1; i >= 0; i--) { // 投递到期消息
+        if (queue[i].at <= tick) { queue[i].fn(); queue.splice(i, 1); }
+      }
+      const x = clientScene.world.players[1].x;
+      if (f < 180 && prevX >= 0) maxBacktrack = Math.max(maxBacktrack, prevX - x);
+      prevX = x;
+    }
+  } catch (e) { err = e; }
+  check('延迟 12 帧下双端会话无异常', !err);
+  if (err) console.error(err);
+  check('延迟下镜像 P2 收敛到主机位置',
+    Math.abs(clientScene.world.players[1].x - hostScene.world.players[1].x) < 3);
+  check('移动中镜像 P2 无明显倒退（不漂移）', maxBacktrack < 2);
+}
+
 // ---- 服务器集成（真实子进程 + ws 协议，覆盖公网加固路径）----
 console.log('— 服务器集成 —');
 {
