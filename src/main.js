@@ -6,6 +6,7 @@ import { buildAssets } from './core/assets.js';
 import { LS_HISCORE, LS_STAGE } from './core/const.js';
 import { TitleScene } from './scenes/title.js';
 import { LEVELS } from './game/levels.js';
+import { restoreNetSession } from './net/session.js';
 
 const canvas = document.getElementById('game');
 const engine = new Engine(canvas);
@@ -18,7 +19,7 @@ const game = {
   engine, audio, assets,
   input: input1,            // 菜单/全局操作统一用 P1 输入
   inputs: [input1, input2], // 战斗场景按玩家取用
-  mode: '1p',               // 1p | 2p | net-host | net-client
+  mode: '1p',               // 1p | 2p | net
   net: null,                // 联网会话（lobby 场景建立）
   score: 0,
   playerLevels: [0, 0],     // 跨关保留的升级等级（按玩家）
@@ -64,6 +65,7 @@ window.addEventListener('keydown', (e) => {
 
 engine.attach(game);
 engine.changeScene(new TitleScene(game));
+restoreNetSession(game); // 页面刷新后，使用 sessionStorage 中的令牌恢复原席位
 engine.start();
 
 // 调试/测试句柄

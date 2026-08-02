@@ -29,6 +29,7 @@ export class TallyScene {
     this.done = false;
     this.doneTimer = 0;
     this.clearedAll = stageIndex + 1 >= LEVELS.length;
+    this.retryAt = 0;
   }
 
   get total() {
@@ -62,7 +63,13 @@ export class TallyScene {
     } else {
       this.doneTimer++;
       if (this.doneTimer > 240 || input.pressed('start') || input.pressed('fire')) {
-        if (this.clearedAll) {
+        if (this.game.net) {
+          // 与结束画面一样按服务端确认重发，断线恢复后不会卡在结算画面
+          if (!this.game.net.isReady() && this.t >= this.retryAt) {
+            this.game.net.ready();
+            this.retryAt = this.t + 30;
+          }
+        } else if (this.clearedAll) {
           this.game.commitHiScore(); // 通关也结算最高分
           this.game.engine.changeScene(new TitleScene(this.game));
         } else {

@@ -62,8 +62,7 @@ export class Input {
   postUpdate() { this.pressedSet = {}; }
 }
 
-// 网络驱动的输入：接口与 Input 完全一致，由远端按键消息填充
-// 联网模式下，主机用它接收客机的输入来驱动 P2；客机用它把本地输入发出去
+// 可编程输入：接口与 Input 一致，供测试与非键盘控制使用
 export class NetInput {
   constructor() {
     this.state = {};
@@ -87,7 +86,7 @@ export class NetInput {
     this.pressedSet = { ...edges };
   }
 
-  // 采集本地输入的一帧快照（客机发往主机用）
+  // 采集一帧输入快照
   static snapshotOf(input) {
     return {
       held: { ...input.state },

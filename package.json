@@ -6,9 +6,7 @@
   "private": true,
   "scripts": {
     "start": "node server/server.js",
-    "test": "node test/smoke.mjs",
-    "build:worker": "node worker/build-public.mjs",
-    "deploy:worker": "npm run build:worker && wrangler deploy"
+    "test": "node test/smoke.mjs && node test/net-v2.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"

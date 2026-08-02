@@ -41,19 +41,19 @@ export class Engine {
 
   start() {
     this._scheduleRaf();
-    // 后台标签页 rAF 停止（Chrome 隐藏标签节流），用固定间隔兜底驱动，
-    // 保证联网主机的广播与客机渲染在窗口切走时不断
+    // 浏览器隐藏页面时 requestAnimationFrame 会被大幅降频。
+    // 用固定间隔继续处理联机阶段消息和快照；权威世界始终由服务器推进。
     if (document.addEventListener) {
-      const sync = () => {
+      const syncBackground = () => {
         if (document.hidden) {
-          clearInterval(this._bgTimer);
-          this._bgTimer = setInterval(() => this._loop(performance.now()), 16.7);
+          clearInterval(this._backgroundTimer);
+          this._backgroundTimer = setInterval(() => this._loop(performance.now()), 16.7);
         } else {
-          clearInterval(this._bgTimer);
+          clearInterval(this._backgroundTimer);
         }
       };
-      document.addEventListener('visibilitychange', sync);
-      if (document.hidden) sync(); // 页面以后台方式打开时立即启用兜底
+      document.addEventListener('visibilitychange', syncBackground);
+      if (document.hidden) syncBackground();
     }
   }
 
@@ -102,7 +102,7 @@ export class Engine {
     this.frame++;
     if (this.hitstop > 0) {
       this.hitstop--;
-      // 顿帧期间仍通知场景（联网主机需继续广播快照，保证客机插值缓冲不断流）
+      // 顿帧期间仍给场景一次可选通知。
       if (this.scene && this.scene.onHitstop) this.scene.onHitstop();
       return;
     } // 顿帧期间逻辑暂停

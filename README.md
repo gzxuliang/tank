@@ -4,7 +4,13 @@
 
 ## 启动方式
 
-双击 `启动游戏.bat`，或在项目目录下运行：
+Windows 下直接运行（自动打开浏览器并启动服务器）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File start-game.ps1
+```
+
+或在项目目录下运行：
 
 ```bash
 npm install
@@ -13,12 +19,12 @@ npm start
 
 然后浏览器打开 <http://localhost:8000>。
 
-> 服务器只有一个 `ws` 依赖（WebSocket 中继），同时托管静态页面。
+> 服务器只有一个 `ws` 依赖，同时托管静态页面并运行权威对局。
 > 局域网对战：好友浏览器直接打开 `http://<你的IP>:8000`。
 
 ## 公网部署
 
-联机走的是同一台服务器（静态页面 + WebSocket 中继同端口），让它能被公网访问即可和外地好友对战。服务器已做公网加固：心跳清理死连接、空闲房间超时回收、每 IP 连接数限制、64KB 消息上限。
+联机走同一台 Node 服务器（静态页面 + WebSocket + 权威对局同端口）。服务器已做公网加固：心跳清理死连接、空闲房间超时回收、每 IP 连接数限制、64KB 消息上限。
 
 ### 方式一：云 VPS（推荐）
 
@@ -32,15 +38,21 @@ npm start          # 或 PORT=80 npm start
 
 防火墙/安全组放行对应端口后，好友浏览器打开 `http://<服务器IP>:<端口>` 即可。常驻运行可用 pm2（`pm2 start server/server.js --name tank`）或 systemd。
 
-**Docker（更方便）**：项目自带 `Dockerfile`，VPS 上只需装 Docker：
+**Docker（推荐，Windows 本机打包上传）**：项目自带 `Dockerfile`（node:20-alpine + 生产依赖）。在 Windows 开发机上一键部署：
 
-```bash
-git clone <本仓库> && cd tank
-docker build -t tank .
-docker run -d --name tank -p 8000:8000 --restart unless-stopped tank
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy.ps1
 ```
 
-容器内是 node:20-alpine + 生产依赖，开机自启、崩溃自重启，不用管 Node 版本。
+脚本默认交互式：先列出之前缓存过的服务器（缓存存于 `%APPDATA%\TankDeploy\servers.json`，部署成功后自动写入，不提交仓库），可选择复用或录入新服务器；也可用参数跳过交互：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy.ps1 -Server root@1.2.3.4 -Port 9000
+```
+
+容器对外端口需在云服务器安全组放行对应 TCP 端口后外网可访问。
+
+> 服务器上手动构建同样可行：`git clone <本仓库> && docker build -t tank . && docker run -d --name tank -p 8000:8000 --restart unless-stopped tank`，但要求服务器能访问 npm/Docker Hub。
 
 可用环境变量：`PORT`（端口，默认 8000）、`MAX_CONN_PER_IP`（每 IP 连接上限，默认 20）、`ROOM_IDLE_MINUTES`（空闲房间存活分钟数，默认 30）、`TLS_CERT`/`TLS_KEY`（HTTPS/WSS 证书）。Docker 下用 `-e PORT=8000` 形式传入。
 
@@ -56,24 +68,9 @@ docker run -d --name tank -p 8000:8000 --restart unless-stopped tank
 
 本机跑着游戏，用 frp、cloudflared tunnel 等工具把 8000 端口暴露出去，好友访问穿透后的地址即可，无需改代码。
 
-### 方式四：Cloudflare Worker（serverless，免服务器）
-
-把静态页面与房间中继整体部署到 Cloudflare：Workers Static Assets 托管页面，Durable Object 做 WebSocket 房间中继（与 Node 版同一协议，客户端零改动）。免费档额度约够每天 6 小时对局，超限只报错不扣费。
-
-**一次性准备**：
-
-1. 注册 Cloudflare，在「Workers 和 Pages」里记下 Account ID；
-2. 创建 API Token（模板「Edit Cloudflare Workers」）；
-3. 在 GitHub 仓库 Settings → Secrets and variables → Actions 添加
-   `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_ACCOUNT_ID`。
-
-之后**推送 main 分支即自动部署**（`.github/workflows/deploy-worker.yml`），游戏地址为 `https://tank.<你的子域>.workers.dev`，打开即可联机。
-
-手动部署（可选）：`npx wrangler login` 后执行 `npm run deploy:worker`。
-
 ### 页面与服务器分离（可选）
 
-页面可以托管在别处（如 GitHub Pages），通过 URL 参数指定中继服务器：
+页面可以托管在别处（如 GitHub Pages），通过 URL 参数指定 Node 权威服务器：
 
 ```
 https://<页面地址>/?server=wss://<服务器地址>
@@ -115,9 +112,9 @@ https://<页面地址>/?server=wss://<服务器地址>
 - 程序化像素图集：坦克履带动画、水面波纹、出生法阵、护盾气泡
 - 打击感：爆炸粒子、屏幕震动、顿帧（hit-stop）、受击白闪、得分飘字
 - WebAudio 合成全套 8-bit 音效与标题 BGM
-- 联机：**主机权威 + 快照同步**——主机跑完整游戏逻辑，每 2 帧（30Hz）广播世界快照；
-  客机只发送输入、按快照渲染镜像世界（位置指数平滑、特效本地重建、音效事件随快照下发）；
-  地形 676×2 字节仅变化时全量补发；服务器只做房间配对与消息转发，不解析游戏内容
+- 联机：**服务器权威 + 客户端预测 + 权威纠偏**——Node 服务端 60Hz 运行完整世界、30Hz 发送快照；
+  两端浏览器都立即预测自己的移动和开火，只在预测与权威结果不一致时重放未确认输入；
+  远端实体采用 4～10 帧自适应插值，服务端按玩家看到的历史帧判定子弹命中
 
 ## 目录结构
 
@@ -127,16 +124,19 @@ src/
 ├── core/              # 引擎：主循环/场景栈/输入(双键位表+NetInput)/音频/像素图集/文字
 ├── scenes/            # 场景：标题/大厅/开幕/战斗/结算/结束
 ├── game/              # 玩法：世界/地形/坦克/敌坦AI/子弹/道具/关卡
-├── net/               # 联机：WebSocket 客户端/快照同步/主机会话/客机会话
+├── net/               # 联机：WebSocket 客户端/双端统一会话/快照同步
 └── fx/                # 特效：粒子/爆炸震动/飘字
 server/
-└── server.js          # Node 服务器：静态托管 + WebSocket 房间中继
+├── server.js          # Node 入口：静态托管 + WebSocket
+├── runtime/           # 可复用实时对局内核
+└── games/             # 游戏适配器（坦克规则）
 test/
-└── smoke.mjs          # Node 冒烟测试（stub 浏览器 API 驱动真实逻辑，含联机同步回归）
+├── smoke.mjs          # 本地玩法与快照冒烟测试
+└── net-v2.mjs         # 延迟抖动、恢复连接和真实服务器测试
 ```
 
 运行测试：
 
 ```bash
-node test/smoke.mjs
+npm test
 ```

@@ -1,5 +1,4 @@
-// 快照同步：主机把 World 序列化为快照，客机应用到镜像 World
-// 主机权威模型：只有主机跑游戏逻辑，客机按快照重建实体后复用 World.render
+// 快照同步：服务端把权威 World 序列化，两个浏览器按快照重建镜像 World
 import { Player } from '../game/player.js';
 import { Enemy } from '../game/enemy.js';
 import { Bullet } from '../game/bullet.js';
@@ -30,7 +29,7 @@ export function applyMap(tilemap, msg) {
 export function serializeWorld(world, extra = {}) {
   return {
     t: 'snap',
-    hf: world.game.engine.frame, // 主机帧号：客机插值缓冲的时间轴（顿帧期间也推进）
+    hf: world.game.engine.frame, // 服务端帧号：浏览器插值缓冲的时间轴
     sg: world.stageIndex, // 关卡号：两端场景错位时客机丢弃过期快照
     st: world.state,
     stT: world.stateTimer,
@@ -38,7 +37,7 @@ export function serializeWorld(world, extra = {}) {
     pl: world.players.map((p) => ({
       id: p.id, x: p.x, y: p.y, dir: p.dir, lv: p.level,
       alive: p.alive, spT: p.spawnTimer, shT: p.shieldTimer,
-      moving: p.moving, tread: p.treadFrame,
+      moving: p.moving, tread: p.treadFrame, slT: p.slideTimer || 0, slD: p.slideDir ?? p.dir,
     })),
     en: world.enemies.map((e) => ({
       id: e.id, x: e.x, y: e.y, dir: e.dir, type: e.type, hp: e.hp,
@@ -47,7 +46,7 @@ export function serializeWorld(world, extra = {}) {
     })),
     bu: world.bullets.map((b) => ({
       id: b.id, x: b.x, y: b.y, dir: b.dir, spd: b.speed, pow: b.power, isP: b.isPlayerBullet,
-      own: b.ownerId ?? (b.owner && b.owner.id), fs: b.clientFireSeq,
+      own: b.ownerId ?? (b.owner && b.owner.id), fs: b.clientFireSeq, fe: b.clientFireEpoch,
     })),
     pu: world.powerups.map((p) => ({ id: p.id, x: p.x, y: p.y, type: p.type })),
     lv: [...world.lives],
@@ -56,19 +55,19 @@ export function serializeWorld(world, extra = {}) {
     sq: world.spawnQueue.length,
     frz: world.freezeTimer,
     shv: world.shovelTimer,
-    fx: world.fxEvents,       // 本帧视觉事件（主机在发送后清空）
-    ...extra,                 // ev: 音效事件; ps: 主机暂停标志
+    fx: world.fxEvents,
+    ...extra,                 // ev: 音效事件; ps: 服务端暂停标志
   };
 }
 
-// 快照缓冲：客机保留最近几帧快照，渲染时按 hf 时间轴插值（固定渲染延迟换恒定速度平滑）
+// 快照缓冲：浏览器保留最近几帧快照，渲染时按 hf 时间轴插值。
 const SNAP_BUFFER_MAX = 30;
 
-// 快照入队 + 瞬时应用（客机）：状态/分数/地形/音效/特效/实体集合立即生效；
-// 实体位置由 interpolateTo 每渲染帧插值（自己的 P2 除外，由预测 + _reconcile 管理）
-// selfSlot：客机自己的玩家 slot（固定为 P2=1）。该玩家的位置由本地预测管理，
-// 正常移动时跳过 >24px 瞬移落位（避免预测与权威的恒差被硬拉成跳变）；
-// 阵亡/重生（alive=false 或 spawnTimer>0）仍正常落位
+// 快照入队 + 瞬时应用：状态/分数/地形/音效/特效/实体集合立即生效；
+// 实体位置由 interpolateTo 插值，自己的玩家由预测和纠偏管理。
+// selfSlot：当前浏览器自己的玩家 slot。
+// 活动中的坦克始终由快照缓冲平滑显示，不能因为丢了一份快照就直接跳到最新坐标；
+// 阵亡/重生（alive=false 或 spawnTimer>0）才立即落位。
 // 缺省（无 selfSlot，测试直用）时行为不变
 export function pushSnapshot(world, snap, selfSlot) {
   world.state = snap.st;
@@ -85,7 +84,7 @@ export function pushSnapshot(world, snap, selfSlot) {
   syncPlayers(world, snap.pl, selfSlot);
   syncEnemies(world, snap.en);
   const self = selfSlot === undefined ? null : world.players.find((p) => p.slot === selfSlot);
-  syncBullets(world, snap.bu, self && self.id, snap.fAck);
+  syncBullets(world, snap.bu, self && self.id);
   syncPowerups(world, snap.pu);
 
   // 视觉事件：爆炸/飘字在客机本地重建（粒子本地生成）
@@ -109,8 +108,7 @@ export function pushSnapshot(world, snap, selfSlot) {
   while (buf.length > SNAP_BUFFER_MAX) buf.shift();
 }
 
-// 每渲染帧：把远端实体位置插值到 renderHf 时刻（相邻快照线性插值，恒定速度；
-// 快照间隔不均/hitstop 间隙由 hf 时间轴吸收）。自己的 P2 跳过（预测 + _reconcile 管理）
+// 每渲染帧：把远端实体位置插值到 renderHf 时刻；自己的玩家跳过。
 // 状态字段（方向/存活/动画等）已由 pushSnapshot 按最新快照写入，这里只写位置
 // 缓冲不足时回退到最近帧位置
 function findIn(list, id) {
@@ -130,8 +128,8 @@ export function interpolateTo(world, renderHf, selfSlot) {
   const span = f1.hf - f0.hf;
   const t = span > 0 ? Math.min(1, Math.max(0, (renderHf - f0.hf) / span)) : 0;
 
-  const self = world.players[1];
-  const selfId = (selfSlot !== undefined && self) ? self.id : -1;
+  const self = selfSlot === undefined ? null : world.players.find((player) => player.slot === selfSlot);
+  const selfId = self ? self.id : -1;
 
   // 玩家（跳过自己）
   for (const p of world.players) {
@@ -173,14 +171,13 @@ export function interpolateTo(world, renderHf, selfSlot) {
   }
 }
 
-// 位置平滑：客机实体带 _tx/_ty 目标坐标，渲染帧间指数趋近（30Hz 快照下消除抖动）
-// skip：本地预测的实体（客机自己的坦克）跳过平滑，由预测逻辑自行纠偏
-// noSnap：即使偏差 >24px 也不直接落位（只更新目标），供客机自己的坦克正常移动时使用
+// 记录快照目标坐标；自己的活动坦克不直接改物理位置。
+// 位置主要由快照缓冲插值每帧写入；死亡/出生动画（smooth 且 noSnap=false）或
+// 与权威位置相差超过 24px（瞬移/复活）时直接落位，避免长距离滑翔。
 function lerpEntity(e, x, y, smooth, noSnap) {
   if (smooth) {
-    e._tx = x; e._ty = y;
     if (!noSnap && (e.x === undefined || Math.abs(e.x - x) > 24 || Math.abs(e.y - y) > 24)) {
-      e.x = x; e.y = y; // 首次出现或瞬移（出生/复活）直接落位
+      e.x = x; e.y = y;
     }
   } else {
     e.x = x; e.y = y;
@@ -196,12 +193,15 @@ function syncPlayers(world, list, selfSlot) {
       p.id = s.id;
       world.players.push(p);
     }
-    // 客机自己的坦克：正常移动（存活且不在出生动画中）跳过瞬移落位，位置交给 _reconcile 预测管理
+    // 自己的活动坦克保留本地控制字段和预测位置，权威差异由会话统一纠偏。
     const isSelf = p.slot === selfSlot;
-    lerpEntity(p, s.x, s.y, true, isSelf && s.alive && s.spT <= 0);
-    p.dir = s.dir; p.level = s.lv; p._applyLevel();
+    lerpEntity(p, s.x, s.y, true, s.alive && s.spT <= 0);
+    p.level = s.lv; p._applyLevel();
     p.alive = s.alive; p.spawnTimer = s.spT; p.shieldTimer = s.shT;
-    p.moving = s.moving; p.treadFrame = s.tread;
+    if (!isSelf || !s.alive || s.spT > 0) {
+      p.dir = s.dir; p.moving = s.moving; p.treadFrame = s.tread;
+      p.slideTimer = s.slT || 0; p.slideDir = s.slD ?? s.dir;
+    }
   }
   world.players = world.players.filter((p) => list.some((s) => s.id === p.id));
 }
@@ -214,7 +214,7 @@ function syncEnemies(world, list) {
       e.id = s.id;
       world.enemies.push(e);
     }
-    lerpEntity(e, s.x, s.y, true);
+    lerpEntity(e, s.x, s.y, true, s.alive && s.spT <= 0);
     e.dir = s.dir; e.hp = s.hp; e.alive = s.alive;
     e.spawnTimer = s.spT; e.frozen = s.frz; e.hitFlash = s.hitF;
     e.moving = s.moving; e.treadFrame = s.tread;
@@ -222,13 +222,14 @@ function syncEnemies(world, list) {
   world.enemies = world.enemies.filter((e) => list.some((s) => s.id === e.id));
 }
 
-function syncBullets(world, list, selfId, fireAck) {
+function syncBullets(world, list, selfId) {
   for (const s of list) {
     let b = world.bullets.find((bu) => bu.id === s.id);
     if (!b) {
-      // 只有同一射手、同一开火编号才能接管预测子弹；P1 子弹绝不能吞掉 P2 预测子弹。
-      b = s.own === selfId && typeof s.fs === 'number'
-        ? world.bullets.find((lb) => lb.localPredicted && lb.ownerId === selfId && lb.clientFireSeq === s.fs)
+      // 只有同一射手、同一连接代次和同一开火编号才能接管预测子弹。
+      b = s.own === selfId && typeof s.fs === 'number' && typeof s.fe === 'number'
+        ? world.bullets.find((lb) => lb.localPredicted && lb.ownerId === selfId &&
+          lb.clientFireSeq === s.fs && lb.clientFireEpoch === s.fe)
         : null;
       if (b) {
         b.id = s.id;
@@ -244,18 +245,9 @@ function syncBullets(world, list, selfId, fireAck) {
     b.dir = s.dir;
     b.speed = s.spd; b.power = s.pow; b.isPlayerBullet = s.isP;
     b.ownerId = s.own;
+    b.clientFireEpoch = s.fe;
     b.owner = world.players.find((p) => p.id === s.own) || null;
     b.alive = true;
-  }
-  // 开火事件已被主机处理，却没有对应权威子弹：表示被拒绝或已经命中，应立即撤销。
-  // fireAck 与 fireSeq 属于同一序号空间；输入 ack 不能用于这里，否则公网下会提前删首发子弹。
-  if (selfId !== undefined && typeof fireAck === 'number') {
-    for (const b of world.bullets) {
-      if (b.localPredicted && b.ownerId === selfId && typeof b.clientFireSeq === 'number' &&
-          b.clientFireSeq <= fireAck && !list.some((s) => s.own === selfId && s.fs === b.clientFireSeq)) {
-        b.alive = false;
-      }
-    }
   }
   // 未确认的本地预测子弹保留；权威子弹按最新快照集合裁剪。
   world.bullets = world.bullets.filter((b) => b.alive &&

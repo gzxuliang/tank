@@ -72,9 +72,9 @@ export class World {
     this.overReason = null;       // 'tank' | 'base'
     this.stateTimer = 0;
     this.lastShake = { x: 0, y: 0 };
-    // 敌人位置环形历史（P2 子弹延迟补偿：命中判定回滚到客机开火时刻）
-    this.enemyHistory = new Array(60).fill(null);
-    this.inputLag = 0;            // 客机输入延迟（帧），由主机会话写入
+    // 敌人位置环形历史（联网子弹延迟补偿：判定使用玩家看到的服务端帧）
+    this.enemyHistory = new Array(120).fill(null);
+    this.externalPlayerControl = false; // 服务端权威模式：玩家操作由带序号的命令单独执行
   }
 
   get audio() { return this.game.audio; }
@@ -96,9 +96,12 @@ export class World {
   // ---- 主更新 ----
   // inputs：与 players 对齐的输入数组（单人传 [input]，双人传 [input1, input2]）
   update(inputs) {
-    // 敌人位置历史（延迟补偿用）：按主机帧号记录，60 帧环形
+    // 敌人位置历史（延迟补偿用）：按服务端帧号记录，保留约 2 秒
     const hf = this.game.engine.frame;
-    this.enemyHistory[hf % 60] = { hf, enemies: this.enemies.map((e) => ({ id: e.id, x: e.x, y: e.y })) };
+    this.enemyHistory[hf % this.enemyHistory.length] = {
+      hf,
+      enemies: this.enemies.map((e) => ({ id: e.id, x: e.x, y: e.y })),
+    };
 
     // 结算/结束状态：仅更新视觉残留
     if (this.state !== 'playing') {
@@ -132,7 +135,8 @@ export class World {
     for (let i = 0; i < this.players.length; i++) {
       const p = this.players[i];
       if (p.alive) {
-        p.update(this, inputs[i]);
+        if (this.externalPlayerControl) p.tickTimers();
+        else p.update(this, inputs[i]);
       } else if (this.respawnTimers[i] > 0) {
         this.respawnTimers[i]--;
         if (this.respawnTimers[i] === 0 && this.lives[i] > 0) {
@@ -244,7 +248,7 @@ export class World {
 
   // 指定主机帧的敌人位置（延迟补偿判定用）；历史缺失（帧未记录）返回 null
   enemyPosAt(frame, id) {
-    const h = this.enemyHistory[frame % 60];
+    const h = this.enemyHistory[((frame % this.enemyHistory.length) + this.enemyHistory.length) % this.enemyHistory.length];
     if (!h || h.hf !== frame) return null;
     const e = h.enemies.find((x) => x.id === id);
     return e || null;
@@ -254,11 +258,14 @@ export class World {
     const b = new Bullet(tank);
     b.id = this.nextId++;
     b.ownerId = tank.id;
-    b.bornHf = this.game.engine.frame; // 生成帧号：P2 子弹延迟补偿的基准
-    // 客机 P2 的开火命令在主机帧中带入，用于权威子弹回传时精确接管。
-    if (tank.isPlayer && tank.slot === 1 && this.pendingP2Fire) {
-      b.clientFireSeq = this.pendingP2Fire.fireSeq;
-      b.clientViewHf = this.pendingP2Fire.viewHf;
+    b.bornHf = this.game.engine.frame; // 生成时的服务端帧号
+    // 联网开火命令与移动命令一起执行，权威子弹据此和本地预测子弹对应。
+    if (tank.isPlayer && this.pendingPlayerFire && this.pendingPlayerFire.slot === tank.slot) {
+      b.clientFireSeq = this.pendingPlayerFire.fireSeq;
+      b.clientFireEpoch = this.pendingPlayerFire.fireEpoch;
+      b.clientViewHf = this.pendingPlayerFire.viewHf;
+      b.rewindStartHf = this.pendingPlayerFire.viewHf;
+      b.ageFrames = 0;
     }
     this.bullets.push(b);
     // 炮口火光
@@ -435,11 +442,11 @@ export class World {
     this.tilemap.renderGround(ctx, assets, this.game.engine.frame);
     for (const p of this.powerups) if (p.alive) this._shadow(ctx, p.x, p.y);
     for (const p of this.powerups) p.render(ctx, assets, this.game.engine.frame);
-    for (const e of this.enemies) if (e.spawnTimer <= 0) this._shadow(ctx, e.x, e.y);
-    for (const e of this.enemies) e.render(ctx, assets, this.game.engine.frame);
+    for (const e of this.enemies) if (e.alive && e.spawnTimer <= 0) this._shadow(ctx, e.x, e.y);
+    for (const e of this.enemies) if (e.alive) e.render(ctx, assets, this.game.engine.frame);
     for (const pl of this.players) {
       if (pl.alive && pl.spawnTimer <= 0) this._shadow(ctx, pl.x, pl.y);
-      pl.render(ctx, assets, this.game.engine.frame);
+      if (pl.alive) pl.render(ctx, assets, this.game.engine.frame);
     }
     for (const b of this.bullets) b.render(ctx, assets);
     for (const ex of this.explosions) ex.render(ctx, assets);

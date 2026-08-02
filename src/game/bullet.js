@@ -27,6 +27,7 @@ export class Bullet {
   }
 
   update(world) {
+    this.ageFrames = (this.ageFrames || 0) + 1;
     // 分段步进，防止高速穿透
     const steps = Math.ceil(this.speed);
     for (let i = 0; i < steps && this.alive; i++) {
@@ -64,21 +65,30 @@ export class Bullet {
     }
     // 坦克
     if (this.isPlayerBullet) {
-      // P2 子弹延迟补偿：客机「看到什么打什么」——命中判定回滚到客机开火时刻的敌人位置。
-      // P1 子弹（本机无延迟）与敌人子弹不补偿
-      const lag = this.owner && this.owner.slot === 1 ? (world.inputLag || 0) : 0;
-      // 优先使用开火时客机实际渲染的主机帧；旧协议再回退到延迟估算。
-      const backFrame = typeof this.clientViewHf === 'number' ? this.clientViewHf : this.bornHf - lag;
+      // 联网玩家子弹按“开火时看到的帧 + 已飞行帧数”查询敌人历史位置。
+      // 这样历史时间会随子弹飞行推进，不会永远停在开火瞬间。
+      const backFrame = typeof this.rewindStartHf === 'number'
+        ? this.rewindStartHf + (this.ageFrames || 0)
+        : null;
       for (const e of world.enemies) {
         if (!e.alive || e.spawnTimer > 0) continue;
         let ox = e.x, oy = e.y;
-        if (lag > 0) {
+        if (backFrame !== null) {
           const hp = world.enemyPosAt(backFrame, e.id);
           if (hp) { ox = hp.x; oy = hp.y; } // 历史缺失时回退当前
         }
         if (this._overlapsAt(ox, oy)) {
           world.bulletExplode(this, false);
           world.enemyHit(e, this);
+          return;
+        }
+      }
+      // 合作模式同样需要阻挡队友子弹；只排除发射者自身，命中规则仍完全由服务端执行。
+      for (const p of world.players) {
+        if (p === this.owner || p.id === this.ownerId || !p.alive || p.spawnTimer > 0) continue;
+        if (this._overlaps(p)) {
+          world.bulletExplode(this, false);
+          world.playerHit(this, p);
           return;
         }
       }

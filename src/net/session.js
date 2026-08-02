@@ -1,330 +1,462 @@
-// 联网会话：主机权威 + 快照同步
-// 主机（NetHostSession）：跑权威 World，P2 输入来自客机，每 2 帧广播快照
-// 客机（NetClientSession）：发本地输入（带帧序号），按快照更新镜像 World 并渲染；
-// 自己的坦克做本地预测 + 回放纠偏（快照回执已确认输入序号，倒回权威位置重放），
-// 预测准确时零跳动，消除操作延迟与漂移
-import { NetInput } from '../core/input.js';
-import { serializeWorld, pushSnapshot, serializeMap, applyMap, interpolateTo } from './sync.js';
-import { TitleScene } from '../scenes/title.js';
+// 联网对局控制器：双方使用相同客户端，负责阶段切换、输入预测、纠偏和断线恢复
 import { DIR_DX, DIR_DY, MAP_W, TILE } from '../core/const.js';
+import { applyMap, interpolateTo, pushSnapshot } from './sync.js';
+import { NetClient, defaultServerUrl } from './client.js';
+import { IntroScene } from '../scenes/intro.js';
+import { GameScene } from '../scenes/game.js';
+import { TallyScene } from '../scenes/tally.js';
+import { GameOverScene } from '../scenes/gameover.js';
 
-// 需要同步给客机的音效方法
-const AUDIO_METHODS = [
-  'shoot', 'hitWall', 'hitSteel', 'hitTank', 'explodeSmall', 'explodeBig',
-  'powerupSpawn', 'powerupPick', 'grenade', 'oneUp', 'shovel', 'freeze',
-  'respawn', 'victory', 'gameOver',
-];
+const SESSION_KEY = 'tank_net_session_v3';
+const BASE_INTERP_DELAY = 4;
+const MAX_INTERP_DELAY = 10;
 
-// 音频事件记录：全局只包装一次，事件累积在 game.audioEvents，由主机会话随快照带走
-function ensureAudioWrapped(game) {
-  if (!game.audioEvents) game.audioEvents = [];
-  if (game.audio._netWrapped) return;
-  game.audio._netWrapped = true;
-  for (const m of AUDIO_METHODS) {
-    const orig = game.audio[m].bind(game.audio);
-    game.audio[m] = (...a) => { game.audioEvents.push(m); orig(...a); };
+function saveResume(data) {
+  try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(data)); } catch { /* 存储不可用时忽略 */ }
+}
+
+function loadResume() {
+  try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null'); } catch { return null; }
+}
+
+function clearResume() {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch { /* 存储不可用时忽略 */ }
+}
+
+function heldState(input) {
+  return {
+    up: !!input.state.up,
+    right: !!input.state.right,
+    down: !!input.state.down,
+    left: !!input.state.left,
+  };
+}
+
+function playerState(player) {
+  return {
+    x: player.x,
+    y: player.y,
+    dir: player.dir,
+    moving: player.moving,
+    treadFrame: player.treadFrame,
+    slideTimer: player.slideTimer || 0,
+    slideDir: player.slideDir ?? player.dir,
+  };
+}
+
+function restorePlayer(player, state) {
+  player.x = state.x;
+  player.y = state.y;
+  player.dir = state.dir;
+  player.moving = state.moving;
+  player.treadFrame = state.treadFrame;
+  player.slideTimer = state.slideTimer || 0;
+  player.slideDir = state.slideDir ?? state.dir;
+}
+
+export class NetGameController {
+  constructor(game, client, welcome) {
+    this.game = game;
+    this.client = client;
+    this.code = welcome.code;
+    this.slot = welcome.slot;
+    this.token = welcome.token;
+    this.epoch = welcome.epoch;
+    this.phaseId = 0;
+    this.readySlots = new Set();
+    this.status = 'connected';
+    this.currentSession = null;
+    this.manualClose = false;
+    this.reconnectTimer = null;
+    this.reconnectAttempt = 0;
+    this.pendingOpenOff = null;
+    // 输入与开火序号跨关卡延续：服务端席位序号整场对局单调递增，
+    // 新战斗会话必须从这里续号，否则服务端会把 seq 倒退的输入全部丢弃。
+    this.carriedSeq = 0;
+    this.carriedFireSeq = 0;
+    this._bindClient();
+    this._persist();
+  }
+
+  _bindClient() {
+    this.client.on('phase', (message) => this._onPhase(message));
+    this.client.on('ready-status', (message) => {
+      if (message.phaseId !== this.phaseId || !Array.isArray(message.slots)) return;
+      this.readySlots = new Set(message.slots);
+    });
+    this.client.on('seat-status', (message) => {
+      if (message.slot !== this.slot && message.removed) this.game.notice = '另一名玩家已离开，对局继续';
+    });
+    this.client.on('close', () => this._onClose());
+    this.client.on('resumed', (message) => this._onResumed(message));
+    this.client.on('resume-rejected', (message) => this._resumeRejected(message));
+    this.client.on('snap', (message) => {
+      if (!this.currentSession) this.pendingSnapshot = message;
+    });
+  }
+
+  activate() {
+    this.game.mode = 'net';
+    this.game.net = this;
+    this.game.resetRun();
+    this.game.audio.stopBgm();
+  }
+
+  createGameSession(scene) {
+    this.currentSession = new NetGameSession(this.game, scene, this);
+    if (this.pendingSnapshot) {
+      this.currentSession.acceptSnapshot(this.pendingSnapshot);
+      this.pendingSnapshot = null;
+    }
+    return this.currentSession;
+  }
+
+  ready(phaseId = this.phaseId) {
+    return this.client.command(this.epoch, 'ready', { phaseId });
+  }
+
+  isReady() { return this.readySlots.has(this.slot); }
+
+  togglePause() {
+    this.client.command(this.epoch, 'pause');
+  }
+
+  _onPhase(message) {
+    if (message.phaseId < this.phaseId) return;
+    this.phaseId = message.phaseId;
+    this.readySlots.clear();
+    if (this.currentSession) {
+      // 会话随场景销毁前接住序号，供下一关的新会话延续
+      this.carriedSeq = this.currentSession.seq;
+      this.carriedFireSeq = this.currentSession.fireSeq;
+      this.currentSession.destroy();
+    }
+    this.currentSession = null;
+    if (message.phase === 'intro') {
+      this.game.engine.changeScene(new IntroScene(this.game, message.stageIndex));
+    } else if (message.phase === 'playing') {
+      this.game.engine.changeScene(new GameScene(this.game, message.stageIndex, 20));
+    } else if (message.phase === 'tally') {
+      this.game.engine.changeScene(new TallyScene(this.game, message.stageIndex, message.killStats));
+    } else if (message.phase === 'over') {
+      this.game.engine.changeScene(new GameOverScene(this.game, message.stageIndex, message.reason || 'tank'));
+    }
+  }
+
+  _onClose() {
+    if (this.manualClose || this.status === 'expired') return;
+    this.status = 'reconnecting';
+    if (this.currentSession) this.currentSession.onDisconnected();
+    this._scheduleReconnect();
+  }
+
+  _scheduleReconnect() {
+    if (this.reconnectTimer || this.manualClose) return;
+    const delay = Math.min(3000, 400 + this.reconnectAttempt * 300);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.reconnectAttempt++;
+      if (this.pendingOpenOff) this.pendingOpenOff();
+      this.pendingOpenOff = this.client.on('open', () => {
+        this.pendingOpenOff();
+        this.pendingOpenOff = null;
+        this.client.resume(this.code, this.token);
+      });
+      this.client.connect();
+    }, delay);
+  }
+
+  _onResumed(message) {
+    this.slot = message.slot;
+    this.epoch = message.epoch;
+    this.status = 'connected';
+    this.reconnectAttempt = 0;
+    this._persist();
+    if (this.currentSession) this.currentSession.onResumed();
+  }
+
+  _resumeRejected(message) {
+    this.status = 'expired';
+    clearResume();
+    if (this.currentSession) {
+      this.currentSession.destroy();
+      this.currentSession = null;
+    }
+    this.game.notice = message.msg || '对局恢复失败';
+    this.manualClose = true;
+    this.client.close();
+    this.game.net = null;
+    this.game.mode = '1p';
+    import('../scenes/title.js').then(({ TitleScene }) => {
+      this.game.engine.changeScene(new TitleScene(this.game));
+    });
+  }
+
+  _persist() {
+    saveResume({ url: this.client.url, code: this.code, token: this.token, slot: this.slot });
+  }
+
+  close() {
+    this.manualClose = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.pendingOpenOff) this.pendingOpenOff();
+    clearResume();
+    this.client.close();
   }
 }
 
-// 断线处理：提示并返回标题
-function backToTitleWithNotice(game, text) {
-  if (game.net) { game.net.client.close(); game.net = null; }
-  game.mode = '1p';
-  game.notice = text;
-  game.engine.changeScene(new TitleScene(game));
+export function restoreNetSession(game, transportFactory = null) {
+  const saved = loadResume();
+  if (!saved || !saved.url || !saved.code || !saved.token) return null;
+  const client = new NetClient(saved.url || defaultServerUrl(), transportFactory);
+  const controller = new NetGameController(game, client, {
+    code: saved.code,
+    slot: saved.slot || 0,
+    token: saved.token,
+    epoch: 0,
+  });
+  controller.status = 'reconnecting';
+  controller.activate();
+  client.on('open', () => client.resume(saved.code, saved.token));
+  client.connect();
+  return controller;
 }
 
-export class NetHostSession {
-  constructor(game, scene) {
+export class NetGameSession {
+  constructor(game, scene, controller) {
     this.game = game;
     this.scene = scene;
-    this.isHost = true;
-    this.client = game.net.client;
-    this.netInput = new NetInput(); // 客机玩家的输入
-    this.lastSeq = 0;               // 已消费的客机输入序号
-    this.inQueue = [];              // 输入状态队列：每帧追到最新状态，避免公网突发包永久积压
-    this.fireQueue = [];            // 开火按下沿单独排队，移动状态合并时也不能丢
-    this.lastQueuedFireSeq = 0;
-    this.lastFireSeq = 0;           // 已由权威逻辑处理的开火编号
-    this.pendingP2Fire = null;      // 当前权威帧要消费的 P2 开火命令（带客户端开火编号）
-    this.frame = 0;
-    this.dead = false;
-    this.sendMapNext = true;        // 首包快照附带全量地形
-    ensureAudioWrapped(game);
-    this.client.on('relay', (m) => this.onMessage(m.data)); // 服务器外层包装为 {t:'relay', data}
-    this.client.on('peer-left', () => { this.dead = true; });
-    this.client.on('close', () => { this.dead = true; });
-  }
-
-  onMessage(data) {
-    if (data.t === 'in') {
-      this.inQueue.push(data); // 排队，update 开头合并消费
-    } else if (data.t === 'hello') this.sendMapNext = true; // 客机进入新场景，补发全量地形
-  }
-
-  // 移动是“当前按住状态”，同一权威帧收到多包时直接追到最新一包；
-  // fire 是一次性事件，必须单独排队。这样网络突发不会形成永远追不完的输入积压。
-  _consumeInputs(allowFire = true) {
-    this.pendingP2Fire = null;
-    let latest = null;
-    let highestSeq = this.lastSeq;
-    while (this.inQueue.length) {
-      const m = this.inQueue.shift();
-      if (!m || typeof m.seq !== 'number' || m.seq <= highestSeq) continue;
-      highestSeq = m.seq;
-      latest = m;
-      if (m.edges && m.edges.fire && typeof m.fireSeq === 'number' &&
-          m.fireSeq > this.lastQueuedFireSeq) {
-        this.fireQueue.push({ fireSeq: m.fireSeq, viewHf: m.viewHf });
-        this.lastQueuedFireSeq = m.fireSeq;
-      }
-    }
-    if (latest) {
-      this.netInput.applyRemote(latest.held || {}, {});
-      this.lastSeq = latest.seq;
-      if (typeof latest.viewHf === 'number' && this.scene.world) {
-        this.scene.world.inputLag = Math.max(0, Math.min(30, this.game.engine.frame - latest.viewHf));
-      }
-    } else {
-      this.netInput.pressedSet = {};
-    }
-    if (allowFire && this.fireQueue.length) {
-      this.pendingP2Fire = this.fireQueue.shift();
-      this.netInput.pressedSet.fire = true;
-    }
+    this.controller = controller;
+    this.client = controller.client;
+    this.seq = controller.carriedSeq || 0;      // 延续上一关的序号（断线恢复时已被重置为 0）
+    this.fireSeq = controller.carriedFireSeq || 0;
+    this.history = new Map();
+    this.pendingBatch = [];
+    this.predictedFires = new Map();
+    this.localFireAudio = new Set();
+    this.latestServerFrame = 0;
+    this.renderFrame = undefined;
+    this.interpDelay = BASE_INTERP_DELAY;
+    this.jitterFrames = 0;
+    this.lastSnapLocalFrame = 0;
+    this.lastSnapServerFrame = undefined;
+    this.lastAppliedServerFrame = -1;
+    this.lastAcknowledgedInput = -1;
+    this.disconnected = controller.status !== 'connected';
+    this.unsubscribers = [
+      this.client.on('snap', (message) => this._onSnapshot(message)),
+      this.client.on('fire-result', (message) => this._onFireResult(message)),
+      // 服务端暂停/恢复即时通知：当帧停止或恢复本地预测，不等下一份快照
+      this.client.on('pause', (message) => { this.scene.paused = !!message.ps; }),
+    ];
+    scene.world.externalPlayerControl = true;
   }
 
   update() {
-    if (this.dead) { backToTitleWithNotice(this.game, '对方已断开连接'); return; }
-    this._consumeInputs();
-    const world = this.scene.world;
-    world.pendingP2Fire = this.pendingP2Fire;
-    world.update([this.game.input, this.netInput]);
-    if (this.pendingP2Fire) this.lastFireSeq = this.pendingP2Fire.fireSeq;
-    world.pendingP2Fire = null;
-    this.pendingP2Fire = null;
-    this.netInput.postUpdate();
-    this.frame++;
-    if (this.frame % 2 === 0) this.broadcast();
-  }
-
-  // 主机暂停中：低频心跳，让客机同步显示暂停遮罩
-  updatePaused() {
-    if (this.dead) { backToTitleWithNotice(this.game, '对方已断开连接'); return; }
-    this._consumeInputs(false); // 暂停只更新按住状态，开火事件留到恢复后的权威帧处理
-    if (this.frame++ % 30 === 0) this.broadcast();
-  }
-
-  // 顿帧期间：广播快照（内容不变，hf 推进），客机插值缓冲不断流
-  onHitstop() {
-    if (!this.dead) this.broadcast();
-  }
-
-  broadcast() {
-    const world = this.scene.world;
-    // 地形只在变化（或首包）时发全量，676×2 字节
-    if (this.sendMapNext || world.tilemap._dirty) {
-      this.client.relay(serializeMap(world.tilemap, world.stageIndex));
-      this.sendMapNext = false;
-    }
-    const snap = serializeWorld(world, {
-      ev: this.game.audioEvents.splice(0),
-      ps: this.scene.paused,
-      ack: this.lastSeq, // 回执：客机据此把预测坐标倒回快照点再重放
-      fAck: this.lastFireSeq, // 开火独立回执：不能拿输入帧编号判断预测子弹是否被处理
-    });
-    world.fxEvents = []; // 事件已随快照带走
-    this.client.relay(snap);
-  }
-}
-
-export class NetClientSession {
-  constructor(game, scene) {
-    this.game = game;
-    this.scene = scene;
-    this.isHost = false;
-    this.client = game.net.client;
-    this.dead = false;
-    this.fireSeq = 0;          // 本地开火编号：用于精确接管预测子弹
-    this.seq = 0;              // 本地输入帧序号（随输入发出，主机随快照回执）
-    this.history = new Map();  // seq → 输入快照，回放纠偏用
-    this.lastHf = 0;           // 收到的最新快照主机帧号（随输入回告主机，延迟补偿用）
-    this._renderHf = undefined;
-    this._interpDelay = 6;     // 约 100ms 的初始插值缓冲，按网络抖动自适应增加
-    this._jitterFrames = 0;
-    this._lastSnapLocalFrame = 0;
-    this._lastSnapHf = undefined;
-    this._rttFrames = undefined; // 输入发送到权威确认再返回的平滑 RTT（客户端逻辑帧）
-    this._localFireFrames = 0; // 本地开火后的音效抑制窗口（防主机回传 shoot 双响）
-    this.client.on('relay', (m) => this.onMessage(m.data)); // 服务器外层包装为 {t:'relay', data}
-    this.client.on('peer-left', () => { this.dead = true; });
-    this.client.on('close', () => { this.dead = true; });
-    this.client.relay({ t: 'hello' }); // 通知主机补发全量地形（跨场景同步）
-  }
-
-  onMessage(data) {
     const world = this.scene.world;
     if (!world) return;
-    if (data.sg !== undefined && data.sg !== this.scene.stageIndex) return; // 跨场景错位，丢弃
-    if (data.t === 'map') {
-      applyMap(world.tilemap, data);
-    } else if (data.t === 'snap') {
-      this.lastHf = data.hf; // 记录最新主机帧号（随输入回告，主机算输入延迟）
-      const localFrame = this.game.engine.frame;
-      if (this._lastSnapHf !== undefined) {
-        const expected = data.hf - this._lastSnapHf;
-        const actual = localFrame - this._lastSnapLocalFrame;
-        this._jitterFrames = this._jitterFrames * 0.85 + Math.abs(actual - expected) * 0.15;
-        this._interpDelay = Math.max(6, Math.min(18, 6 + Math.ceil(this._jitterFrames * 2)));
-      }
-      this._lastSnapLocalFrame = localFrame;
-      this._lastSnapHf = data.hf;
-      pushSnapshot(world, data, 1); // 客机固定为 P2（slot 1）：瞬时应用 + 快照入队（插值缓冲）
-      this._reconcile(world, data.ack); // 回放式纠偏自己的坦克
-      for (const m of data.ev || []) {
-        if (m === 'shoot' && this._localFireFrames > 0) continue; // 本地已播过开火音（防双响）
-        if (this.game.audio[m]) this.game.audio[m]();
-      }
-      this.scene.paused = !!data.ps; // 跟随主机暂停（仅显示遮罩，不阻塞快照处理）
-      if (this.game.score > this.game.hiScore) this.game.hiScore = this.game.score;
+    if (!this.disconnected && this.controller.status === 'connected') this._sampleAndPredict(world);
+    this._interpolate(world);
+    this._advanceLocalBullets(world);
+    world._updateFx();
+  }
+
+  onDisconnected() {
+    this.disconnected = true;
+    this.pendingBatch.length = 0;
+  }
+
+  onResumed() {
+    this.disconnected = false;
+    // 服务端恢复席位时已把 ack/lastQueuedSeq/lastFireSeq 清零，两端重新对齐
+    this.seq = 0;
+    this.fireSeq = 0;
+    this.history.clear();
+    this.pendingBatch.length = 0;
+    this.predictedFires.clear();
+    this.localFireAudio.clear();
+    this.lastAcknowledgedInput = -1;
+  }
+
+  _sampleAndPredict(world) {
+    const input = this.game.input;
+    const held = heldState(input);
+    const fireSeq = input.pressed('fire') ? ++this.fireSeq : null;
+    const frame = {
+      seq: ++this.seq,
+      held,
+      fireSeq,
+      viewFrame: Math.floor(this.renderFrame ?? this.latestServerFrame),
+    };
+    if (!this.scene.paused) this._applyPredictedInput(world, frame, true);
+    const me = world.players[this.controller.slot];
+    if (me) this.history.set(frame.seq, { frame, state: playerState(me) });
+    while (this.history.size > 240) this.history.delete(this.history.keys().next().value);
+    this.pendingBatch.push(frame);
+    if (this.pendingBatch.length >= 2) {
+      this.client.sendInputs(this.controller.epoch, this.pendingBatch.splice(0));
     }
   }
 
-  update() {
-    if (this.dead) { backToTitleWithNotice(this.game, '对方已断开连接'); return; }
-    // 每帧发输入并记录历史（主机回执序号后用于回放纠偏）
-    const held = { ...this.game.input.state };
-    const edges = { ...this.game.input.pressedSet };
-    const fireSeq = edges.fire ? ++this.fireSeq : null;
-    this.seq++;
-    this.history.set(this.seq, held);
-    if (this.history.size > 180) this.history.delete(this.seq - 180); // 只留 3 秒
-    // viewHf 是玩家真正看到的远端时间，不是最新到包时间；用于开火回滚判定。
-    const viewHf = this._renderHf === undefined ? this.lastHf : Math.floor(this._renderHf);
-    this.client.relay({ t: 'in', seq: this.seq, held, edges, fireSeq, viewHf });
-    const world = this.scene.world;
-    const me = world.players[1]; // 客机固定为 P2
-    if (this._localFireFrames > 0) this._localFireFrames--;
-    const visualX = me ? me.x + (me._visualOffsetX || 0) : 0;
-    const visualY = me ? me.y + (me._visualOffsetY || 0) : 0;
-    this._applyInput(world, me, held, edges, fireSeq); // 本地预测：输入即时生效 + 开火预测
-    if (me) this._settleVisualCorrection(me, held, visualX, visualY);
-    // 远端实体始终保留一段自适应缓冲。不追到最新快照，避免公网抖动时冻结后跳变。
-    const buf = world._snapBuffer;
-    if (buf && buf.length) {
-      const latest = buf[buf.length - 1].hf;
-      const oldest = buf[0].hf;
-      const target = latest - this._interpDelay;
-      if (this._renderHf === undefined || this._renderHf < oldest) this._renderHf = Math.max(oldest, target);
-      else this._renderHf = Math.min(target, this._renderHf + 1);
-      interpolateTo(world, this._renderHf, 1);
-    }
-    this._advanceLocalBullets(world); // 本地预测子弹推进（直线 + 地形碰撞）
-    world._updateFx();                 // 特效动画本地推进
-  }
-
-  // 缓慢消化纠偏残差；持续按住方向时，纠偏最多让画面停住，绝不反向拉回。
-  _settleVisualCorrection(me, held, beforeX, beforeY) {
-    const settle = (v) => Math.abs(v) <= 0.7 ? 0 : v - Math.sign(v) * 0.7;
-    me._visualOffsetX = settle(me._visualOffsetX || 0);
-    me._visualOffsetY = settle(me._visualOffsetY || 0);
-    const d = held.up ? 0 : held.right ? 1 : held.down ? 2 : held.left ? 3 : -1;
-    if (d < 0) return;
-    const afterX = me.x + me._visualOffsetX;
-    const afterY = me.y + me._visualOffsetY;
-    const progress = (afterX - beforeX) * DIR_DX[d] + (afterY - beforeY) * DIR_DY[d];
-    if (progress >= 0) return;
-    me._visualOffsetX += (beforeX - afterX) * Math.abs(DIR_DX[d]);
-    me._visualOffsetY += (beforeY - afterY) * Math.abs(DIR_DY[d]);
-  }
-
-  // 用一帧输入驱动自己的坦克（移动逻辑与 Player.update 一致）。
-  // fire：本帧按下沿（预测时传真实 pressedSet，回放时传空——重放不重复开火）。
-  // 开火本地预测：立即生成子弹（负数 id，权威接管前不被快照匹配）+ 音效，
-  // 消除公网下「按 fire 后 2×RTT 才有反馈」的延迟感；命中判定仍由主机权威负责
-  _applyInput(world, me, held, fire, fireSeq = null) {
+  _applyPredictedInput(world, frame, advanceTimers) {
+    const me = world.players[this.controller.slot];
     if (!me || !me.alive || world.state !== 'playing') return;
-    me.tickTimers();
-    if (me.spawnTimer > 0) return;
-    const d = held.up ? 0 : held.right ? 1 : held.down ? 2 : held.left ? 3 : -1;
-    if (d >= 0) {
-      me.setDir(d);
-      me.tryMove(world);
-      me.slideTimer = 0;
-      if (world.tilemap.onIce(me.x, me.y, me.w, me.h)) {
-        me.slideTimer = 8;
-        me.slideDir = d;
-      }
-    } else {
-      me.moving = false;
-      // 冰面打滑：松开后继续滑一小段
-      if (me.slideTimer > 0) {
-        me.slideTimer--;
-        me.setDir(me.slideDir);
-        const bak = me.speed;
-        me.speed = bak * 0.7;
-        me.tryMove(world);
-        me.speed = bak;
-      }
-    }
-    // 本地开火预测（按住仅首帧按下沿生效，与本地单人规则一致）
-    if (fire && fire.fire && me.canFire(world)) {
-      world.spawnBullet(me);
-      const b = world.bullets[world.bullets.length - 1];
-      b.id = -1000 - this.seq; // 本地预测子弹：负数 id，权威快照永不匹配
-      b.ownerId = me.id;
-      b.clientFireSeq = fireSeq;
-      b.localPredicted = true;
-      world.audio.shoot(); // 本地立即播（客机 audio 未包装，不产生事件）
-      this._localFireFrames = 12; // 抑制主机回传的 shoot 事件（防双响）
+    if (advanceTimers) me.tickTimers();
+    world.pendingPlayerFire = frame.fireSeq ? {
+      slot: this.controller.slot,
+      fireSeq: frame.fireSeq,
+      fireEpoch: this.controller.epoch,
+      viewHf: frame.viewFrame,
+    } : null;
+    const input = {
+      dirHeld: () => frame.held.up ? 0 : frame.held.right ? 1 : frame.held.down ? 2 : frame.held.left ? 3 : -1,
+      pressed: (action) => action === 'fire' && !!frame.fireSeq,
+    };
+    const fired = me.applyControl(world, input);
+    world.pendingPlayerFire = null;
+    if (fired && frame.fireSeq) {
+      const bullet = world.bullets[world.bullets.length - 1];
+      bullet.id = -frame.fireSeq;
+      bullet.ownerId = me.id;
+      bullet.clientFireSeq = frame.fireSeq;
+      bullet.clientFireEpoch = this.controller.epoch;
+      bullet.localPredicted = true;
+      this.predictedFires.set(frame.fireSeq, bullet);
+      this.localFireAudio.add(frame.fireSeq);
     }
   }
 
-  // 本地预测子弹推进：直线飞行 + 地形/边界碰撞（不做坦克碰撞，命中由主机权威判定）。
-  // 权威子弹按开火编号接管后继续沿本地预测轨迹展示，直到主机快照确认其结束。
+  _onSnapshot(snapshot) {
+    if (snapshot.epoch !== this.controller.epoch || snapshot.sg !== this.scene.stageIndex) return;
+    const serverFrame = snapshot.sf ?? snapshot.hf;
+    if (serverFrame <= this.lastAppliedServerFrame) return;
+    this.lastAppliedServerFrame = serverFrame;
+    const world = this.scene.world;
+    if (!world) return;
+    if (snapshot.map) applyMap(world.tilemap, snapshot.map);
+    this.latestServerFrame = snapshot.sf ?? snapshot.hf;
+    this._updateJitter(snapshot);
+    const authoritative = snapshot.pl && snapshot.pl[this.controller.slot];
+    pushSnapshot(world, snapshot, this.controller.slot);
+    this._reconcile(world, snapshot.ack, authoritative);
+    for (const event of snapshot.ev || []) {
+      const name = typeof event === 'string' ? event : event.name;
+      if (!name || !this.game.audio[name]) continue;
+      if (name === 'shoot' && event.slot === this.controller.slot && this.localFireAudio.has(event.fireSeq)) {
+        this.localFireAudio.delete(event.fireSeq);
+        continue;
+      }
+      this.game.audio[name]();
+    }
+    this.scene.paused = !!snapshot.ps;
+    if (this.game.score > this.game.hiScore) this.game.hiScore = this.game.score;
+  }
+
+  acceptSnapshot(snapshot) { this._onSnapshot(snapshot); }
+
+  _updateJitter(snapshot) {
+    const serverFrame = snapshot.sf ?? snapshot.hf;
+    const localFrame = this.game.engine.frame;
+    if (this.lastSnapServerFrame !== undefined) {
+      const expected = serverFrame - this.lastSnapServerFrame;
+      const actual = localFrame - this.lastSnapLocalFrame;
+      this.jitterFrames = this.jitterFrames * 0.85 + Math.abs(actual - expected) * 0.15;
+      this.interpDelay = Math.max(BASE_INTERP_DELAY, Math.min(MAX_INTERP_DELAY,
+        BASE_INTERP_DELAY + Math.ceil(this.jitterFrames * 1.5)));
+    }
+    this.lastSnapServerFrame = serverFrame;
+    this.lastSnapLocalFrame = localFrame;
+  }
+
+  _reconcile(world, ack, authoritative) {
+    const me = world.players[this.controller.slot];
+    if (!me || !authoritative || !Number.isSafeInteger(ack)) return;
+    // 同一确认号会出现在多份快照里。历史已经在第一次确认时删除，
+    // 不能把之后的重复快照误判为预测错误并把坦克硬拉回去。
+    if (ack <= this.lastAcknowledgedInput) return;
+    this.lastAcknowledgedInput = ack;
+    const predicted = this.history.get(ack);
+    const mismatch = !predicted || Math.abs(predicted.state.x - authoritative.x) > 0.01 ||
+      Math.abs(predicted.state.y - authoritative.y) > 0.01 || predicted.state.dir !== authoritative.dir;
+    if (mismatch) {
+      restorePlayer(me, {
+        x: authoritative.x,
+        y: authoritative.y,
+        dir: authoritative.dir,
+        moving: authoritative.moving,
+        treadFrame: authoritative.tread,
+        slideTimer: authoritative.slT,
+        slideDir: authoritative.slD,
+      });
+      for (let seq = ack + 1; seq <= this.seq; seq++) {
+        const entry = this.history.get(seq);
+        if (!entry) break;
+        this._applyPredictedInput(world, { ...entry.frame, fireSeq: null }, false);
+        entry.state = playerState(me);
+      }
+    }
+    for (const seq of [...this.history.keys()]) if (seq <= ack) this.history.delete(seq);
+  }
+
+  _onFireResult(message) {
+    if (message.epoch !== this.controller.epoch) return;
+    // 被拒绝的开火不会有服务端枪声事件，localFireAudio 在这里兜底清理
+    this.localFireAudio.delete(message.fireSeq);
+    const bullet = this.predictedFires.get(message.fireSeq);
+    if (!bullet) return;
+    if (!message.accepted) bullet.alive = false;
+    else {
+      bullet.id = message.bulletId;
+      bullet.authorityConfirmed = true;
+    }
+    this.predictedFires.delete(message.fireSeq);
+  }
+
+  _interpolate(world) {
+    const buffer = world._snapBuffer;
+    if (!buffer || !buffer.length) return;
+    const latest = buffer[buffer.length - 1].hf;
+    const oldest = buffer[0].hf;
+    const target = latest - this.interpDelay;
+    if (this.renderFrame === undefined || this.renderFrame < oldest) this.renderFrame = Math.max(oldest, target);
+    else this.renderFrame = Math.min(target, this.renderFrame + 1);
+    interpolateTo(world, this.renderFrame, this.controller.slot);
+  }
+
   _advanceLocalBullets(world) {
-    for (const b of world.bullets) {
-      if (!b.localPredicted) continue; // 只看本地预测子弹（确认后仍由本地平滑展示）
-      b._age = (b._age || 0) + 1;
-      if (b._age > 60) { b.alive = false; continue; } // 防御：权威未生成时超时消失
-      const steps = Math.ceil(b.speed);
-      for (let i = 0; i < steps && b.alive; i++) {
-        b.x += DIR_DX[b.dir] * (b.speed / steps);
-        b.y += DIR_DY[b.dir] * (b.speed / steps);
-        if (b.x < 0 || b.x > MAP_W * TILE || b.y < 0 || b.y > MAP_W * TILE) {
-          world.bulletExplode(b, false);
+    for (const bullet of world.bullets) {
+      if (!bullet.localPredicted) continue;
+      bullet._age = (bullet._age || 0) + 1;
+      if (bullet._age > 120) { bullet.alive = false; continue; }
+      const steps = Math.ceil(bullet.speed);
+      for (let i = 0; i < steps && bullet.alive; i++) {
+        bullet.x += DIR_DX[bullet.dir] * (bullet.speed / steps);
+        bullet.y += DIR_DY[bullet.dir] * (bullet.speed / steps);
+        if (bullet.x < 0 || bullet.x > MAP_W * TILE || bullet.y < 0 || bullet.y > MAP_W * TILE) {
+          bullet.alive = false;
           break;
         }
-        const r = b.hitRect();
-        // 客机预测不能改动权威镜像地图；只作只读碰撞预览。
-        const hit = world.tilemap.bulletHit(r.x, r.y, r.w, r.h, b.power, false);
-        if (hit.result) { world.bulletExplode(b, false); break; }
+        const rect = bullet.hitRect();
+        if (world.tilemap.bulletHit(rect.x, rect.y, rect.w, rect.h, bullet.power, false).result) {
+          bullet.alive = false;
+          break;
+        }
+        // 让本地画面也在敌坦/队友前停下；真正的命中、击毁、扣命和重生仍以服务端快照为准。
+        if (bullet.isPlayerBullet) {
+          const hitEnemy = world.enemies.find((enemy) => enemy.alive && enemy.spawnTimer <= 0 &&
+            bullet._overlaps(enemy));
+          if (hitEnemy) bullet.alive = false;
+          const hitPlayer = world.players.find((player) => player.alive && player.spawnTimer <= 0 &&
+            player.id !== bullet.ownerId && bullet._overlaps(player));
+          if (hitPlayer) bullet.alive = false;
+        }
       }
     }
-    world.bullets = world.bullets.filter((b) => b.alive);
+    world.bullets = world.bullets.filter((bullet) => bullet.alive);
   }
 
-  // 回放式纠偏：权威位置已经是主机生成快照时的当前状态，只需补上快照回程期间的输入。
-  // seq-ack 近似完整 RTT，取平滑后的一半作为回程帧数；直接重放完整 RTT 会把去程重复计算，
-  // 尤其会在出生结束或碰撞附近造成大幅前后跳。
-  _reconcile(world, ack) {
-    const me = world.players[1];
-    if (!me || ack === undefined || me._tx === undefined) return;
-    const sampleRtt = Math.max(0, this.seq - ack);
-    this._rttFrames = this._rttFrames === undefined
-      ? sampleRtt
-      : this._rttFrames * 0.85 + sampleRtt * 0.15;
-    const oneWay = Math.max(0, Math.round(this._rttFrames / 2));
-    const end = Math.max(ack, this.seq - oneWay);
-    const screenX = me.x + (me._visualOffsetX || 0);
-    const screenY = me.y + (me._visualOffsetY || 0);
-    me.x = me._tx; me.y = me._ty; // 倒回权威坐标
-    for (let s = ack + 1; s <= end; s++) {
-      const held = this.history.get(s);
-      if (!held) break;           // 历史不足（超大延迟），直接用快照坐标
-      this._applyInput(world, me, held);
-    }
-    me._visualOffsetX = screenX - me.x;
-    me._visualOffsetY = screenY - me.y;
+  destroy() {
+    for (const unsubscribe of this.unsubscribers) unsubscribe();
+    this.unsubscribers = [];
   }
 }

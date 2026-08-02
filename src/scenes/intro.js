@@ -11,6 +11,8 @@ export class IntroScene {
     this.game = game;
     this.stageIndex = stageIndex;
     this.t = 0;
+    this.readyRequested = false;
+    this.retryAt = 0;
   }
 
   enter() { this.game.audio.stageStart(); }
@@ -18,7 +20,15 @@ export class IntroScene {
   update() {
     this.t++;
     if (this.t >= CLOSE_FRAMES + HOLD_FRAMES) {
-      this.game.engine.changeScene(new GameScene(this.game, this.stageIndex, CLOSE_FRAMES));
+      if (this.game.net) {
+        if (!this.readyRequested) this.readyRequested = true;
+        if (!this.game.net.isReady() && this.t >= this.retryAt) {
+          this.game.net.ready();
+          this.retryAt = this.t + 30;
+        }
+      } else {
+        this.game.engine.changeScene(new GameScene(this.game, this.stageIndex, CLOSE_FRAMES));
+      }
     }
     this.game.input.postUpdate();
   }

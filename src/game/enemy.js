@@ -48,7 +48,7 @@ export class Enemy extends Tank {
     } else {
       d = Math.floor(this.rand() * 4);
     }
-    this.setDir(d);
+    this.setDir(d, world);
     this.dirTimer = 30 + Math.floor(this.rand() * 90);
   }
 

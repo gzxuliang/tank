@@ -61,21 +61,18 @@ export class GameScene {
     this.curtain = curtainFrames; // 剩余幕帘开启帧数
     this.paused = false;
     this.world = null;
-    this.session = null; // 联网会话（NetHostSession / NetClientSession），本地模式为 null
+    this.session = null; // 联网镜像会话，本地模式为 null
   }
 
   enter() {
     this.world = new World(this.game, this.stageIndex);
-    // 联网模式：让会话接管世界（主机驱动输入与广播，客机改为镜像渲染）
+    // 联网模式：两端都只做本地预测与快照渲染，完整游戏逻辑由服务器运行。
     if (this.game.net) {
       this.session = this.game.net.createGameSession(this);
     }
   }
 
-  // 引擎顿帧期间调用：主机仍需广播快照（帧号推进），保证客机插值缓冲不断流
-  onHitstop() {
-    if (this.session && this.session.isHost) this.session.onHitstop();
-  }
+  onHitstop() { /* 联网权威逻辑在服务器上继续推进；浏览器无需代发快照。 */ }
 
   update() {
     const input = this.game.input;
@@ -87,20 +84,20 @@ export class GameScene {
       return;
     }
 
-    // 暂停：本地模式与联网主机可暂停；客机的 paused 仅作遮罩显示（由快照驱动）
-    const canPause = !this.session || this.session.isHost;
+    // 本地模式直接暂停；联网只允许 P1 请求服务器暂停，双方仍持续收发快照。
+    const canPause = !this.session || this.game.net.slot === 0;
     if (input.pressed('pause') && canPause) {
-      this.paused = !this.paused;
+      if (this.session) this.game.net.togglePause();
+      else this.paused = !this.paused;
       this.game.audio.pause();
     }
-    if (this.paused && canPause) {
+    if (this.paused && !this.session) {
       input.postUpdate();
-      if (this.session) this.session.updatePaused(); // 通知客机同步暂停遮罩
       return;
     }
 
     if (this.session) {
-      // 联网：主机跑权威逻辑 + 广播快照；客机发输入 + 应用快照
+      // 联网双方流程完全相同：采样输入、本地预测、应用服务端快照。
       this.session.update();
     } else {
       this.world.update(this.game.inputs.slice(0, this.world.playerCount));
@@ -108,14 +105,14 @@ export class GameScene {
     input.postUpdate();
     this.game.inputs[1].postUpdate();
 
-    // 场景流转
-    if (this.world.state === 'clear' && this.world.stateTimer <= 0) {
+    // 联网场景由服务器 phase 消息切换；本地模式沿用世界状态切换。
+    if (!this.session && this.world.state === 'clear' && this.world.stateTimer <= 0) {
       // 跨关保留升级与命数（按玩家）
       this.game.playerLevels = this.world.players.map((p) => p.level);
       this.game.lives = [...this.world.lives];
       this.game.unlockStage(this.stageIndex + 2);
       this.game.engine.changeScene(new TallyScene(this.game, this.stageIndex, this.world.killStats));
-    } else if (this.world.state === 'over' && this.world.stateTimer <= 0) {
+    } else if (!this.session && this.world.state === 'over' && this.world.stateTimer <= 0) {
       this.game.engine.changeScene(new GameOverScene(this.game, this.stageIndex, this.world.overReason));
     }
   }
@@ -147,7 +144,6 @@ export class GameScene {
       ctx.fillStyle = 'rgba(0,0,0,0.55)';
       ctx.fillRect(FIELD_X, FIELD_Y, FIELD_SIZE, FIELD_SIZE);
     }
-
     // 幕帘开启动画
     if (this.curtain > 0) {
       const p = this.curtain / 20;
@@ -197,6 +193,11 @@ export class GameScene {
       });
       drawText(dctx, '按 P 继续', FIELD_X + FIELD_SIZE / 2, FIELD_Y + FIELD_SIZE / 2 + 12, {
         size: 7, align: 'center', color: '#c0c0c0', shadow: null,
+      });
+    }
+    if (this.session && this.game.net.status === 'reconnecting') {
+      drawText(dctx, '连接中断，正在恢复…', FIELD_X + FIELD_SIZE / 2, FIELD_Y + FIELD_SIZE / 2 + 30, {
+        size: 7, align: 'center', color: '#68d8f0', shadow: null,
       });
     }
   }

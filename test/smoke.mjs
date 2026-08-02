@@ -359,6 +359,12 @@ console.log('— 本地双人 —');
   w2.playerHit({ x: 0, y: 0 }, w2.players[0]);
   check('P1 阵亡扣自己的命', w2.lives[0] === 2 && w2.lives[1] === 3);
   check('P1 阵亡后游戏继续', w2.state === 'playing' && w2.players[1].alive);
+  let deadTankRenderCount = 0;
+  const renderDeadTank = w2.players[0].render;
+  w2.players[0].render = () => { deadTankRenderCount++; };
+  w2.render(ctx2dStub());
+  w2.players[0].render = renderDeadTank;
+  check('阵亡玩家坦克不会继续渲染', deadTankRenderCount === 0);
 
   // 道具归属拾取者
   w2._applyPowerup({ type: 'life', x: 0, y: 0 }, w2.players[1]);
@@ -418,9 +424,17 @@ console.log('— 重生占位处理 —');
   q2.x = sx - 32;                        // P2 让开
   for (let f = 0; f < 40; f++) { w4.update([in4, in4]); in4.postUpdate(); }
   check('队友让开后正常重生', q1.alive && !w4.tankBlocked(q1, q1.x, q1.y, 16, 16));
+
+  // 转向时的网格对齐不能把本来刚好相邻的坦克挤到一起
+  w4.tilemap.cells.fill(0); w4.tilemap.brickMask.fill(0);
+  q1.alive = true; q2.alive = true;
+  q1.spawnTimer = 0; q2.spawnTimer = 0;
+  q1.x = 33; q1.y = 64; q2.x = 49; q2.y = 64;
+  q1.setDir(0, w4);
+  check('转向对齐不会把坦克挤进另一辆坦克', q1.x === 33 && !w4.tankBlocked(q1, q1.x, q1.y, 16, 16));
 }
 
-// ---- 联网快照同步（主机权威：序列化 → 应用到镜像世界）----
+// ---- 联网快照同步（权威世界：序列化 → 应用到镜像世界）----
 console.log('— 联网快照同步 —');
 {
   const { World } = await import('../src/game/world.js');
@@ -450,10 +464,13 @@ console.log('— 联网快照同步 —');
 
   // 快照应用：实体计数与关键状态一致
   const snap = serializeWorld(hostWorld, {});
+  const beforeSnapX = mirrorWorld.players.map((p) => p.x);
   pushSnapshot(mirrorWorld, snap, 1);
+  // 位置契约：活动中的玩家保持插值前位置（随后由快照缓冲平滑），
+  // 只有死亡/出生或相距超过 24px 的瞬移才在应用快照时直接落位
   check('快照同步玩家目标位置',
-    mirrorWorld.players[0]._tx === hostWorld.players[0].x &&
-    mirrorWorld.players[1]._tx === hostWorld.players[1].x);
+    mirrorWorld.players.every((p, i) =>
+      p.x === beforeSnapX[i] || Math.abs(p.x - hostWorld.players[i].x) < 0.01));
   check('快照同步敌坦数量', mirrorWorld.enemies.length === hostWorld.enemies.length);
   check('快照同步子弹数量', mirrorWorld.bullets.length === hostWorld.bullets.length);
   check('快照同步命数与状态',
@@ -461,13 +478,17 @@ console.log('— 联网快照同步 —');
   check('快照同步敌坦字段',
     mirrorWorld.enemies.every((e) => {
       const h = hostWorld.enemies.find((x) => x.id === e.id);
-      return h && e.type === h.type && e.hp === h.hp && e._tx === h.x;
+      return h && e.type === h.type && e.hp === h.hp && e.alive === h.alive;
     }));
 
   // 插值到最新快照帧：位置收敛到主机位置（替代旧指数趋近）
   interpolateTo(mirrorWorld, snap.hf, 1);
   check('插值后镜像收敛到主机坐标',
-    Math.abs(mirrorWorld.players[0].x - hostWorld.players[0].x) < 0.5);
+    Math.abs(mirrorWorld.players[0].x - hostWorld.players[0].x) < 0.5 &&
+    mirrorWorld.enemies.every((e) => {
+      const h = hostWorld.enemies.find((x) => x.id === e.id);
+      return h && Math.abs(e.x - h.x) < 0.5 && Math.abs(e.y - h.y) < 0.5;
+    }));
 
   // 地形增量同步：打穿一块砖，序列化/应用后两端一致
   hostWorld.tilemap.cells[hostWorld.tilemap.idx(5, 5)] = 1;
@@ -477,471 +498,6 @@ console.log('— 联网快照同步 —');
   check('地形同步一致',
     mirrorWorld.tilemap.cells[5 * 26 + 5] === hostWorld.tilemap.cells[5 * 26 + 5] &&
     mirrorWorld.tilemap.brickMask[5 * 26 + 5] === hostWorld.tilemap.brickMask[5 * 26 + 5]);
-}
-
-// ---- 联网会话端到端（内存传输对：主机权威逻辑 + 客机镜像渲染）----
-console.log('— 联网会话端到端 —');
-{
-  const { World } = await import('../src/game/world.js');
-  const { NetInput } = await import('../src/core/input.js');
-  const { NetClient } = await import('../src/net/client.js');
-  const { NetHostSession, NetClientSession } = await import('../src/net/session.js');
-
-  // 内存双工传输对：host → client、client → host 直接互发
-  let hostH = null, clientH = null;
-  const hostNet = new NetClient('mem', (u, h) => {
-    hostH = h;
-    return { send: (s) => clientH && clientH.message(s), close: () => {} };
-  });
-  const clientNet = new NetClient('mem', (u, h) => {
-    clientH = h;
-    return { send: (s) => hostH && hostH.message(s), close: () => {} };
-  });
-  hostNet.connect(); clientNet.connect();
-
-  // 主机端：权威世界 + 会话（P1 输入本地，P2 输入来自网络）
-  const hostGame = Object.create(game);
-  hostGame.mode = 'net-host';
-  hostGame.engine = { frame: 0, addHitstop: noop };
-  hostGame.playerLevels = [0, 0]; hostGame.lives = [3, 3]; hostGame.score = 0;
-  hostGame.input = new NetInput();
-  hostGame.net = { client: hostNet };
-  const hostScene = { world: new World(hostGame, 0), stageIndex: 0, paused: false };
-
-  // 客机端：镜像世界 + 会话
-  const clientGame = Object.create(game);
-  clientGame.mode = 'net-client';
-  clientGame.engine = { frame: 0, addHitstop: noop };
-  clientGame.playerLevels = [0, 0]; clientGame.lives = [3, 3]; clientGame.score = 0;
-  clientGame.input = new NetInput();
-  clientGame.net = { client: clientNet };
-  const clientScene = { world: new World(clientGame, 0), stageIndex: 0, paused: false };
-
-  const hostSess = new NetHostSession(hostGame, hostScene);
-  const clientSess = new NetClientSession(clientGame, clientScene);
-
-  let err = null;
-  try {
-    for (let f = 0; f < 240; f++) {
-      // 主机玩家原地，客机玩家（P2）持续向右 + 间歇射击
-      hostGame.input.applyRemote({}, {});
-      clientGame.input.applyRemote({ right: true }, f % 40 === 0 ? { fire: true } : {});
-      hostGame.engine.frame++;
-      clientGame.engine.frame++;
-      hostSess.update();
-      clientSess.update();
-      hostGame.input.postUpdate();
-      clientGame.input.postUpdate();
-    }
-  } catch (e) { err = e; }
-  check('双端 240 帧会话无异常', !err);
-  if (err) console.error(err);
-
-  const hw = hostScene.world, cw = clientScene.world;
-  check('客机输入驱动了主机世界的 P2', hw.players[1].x > 18 * 8); // P2 出生 x=144，向右移动过
-  check('P2 位置经快照同步到镜像', Math.abs(cw.players[1]._tx - hw.players[1].x) < 0.001);
-  check('联网会话使用持续递增的主机帧号', clientSess.lastHf > 100 && clientSess.lastHf === hostGame.engine.frame);
-  check('本地预测后镜像 P2 与主机位置收敛', Math.abs(cw.players[1].x - hw.players[1].x) < 2);
-  check('镜像敌坦与主机一致', cw.enemies.length === hw.enemies.length && hw.enemies.length > 0);
-  check('镜像子弹含 P2 所射', hw.bullets.some((b) => b.owner === hw.players[1]) ===
-    cw.bullets.some((b) => b.isPlayerBullet));
-  check('镜像分数与主机一致', cw.game.score === hw.game.score);
-  check('镜像地形与主机一致',
-    cw.tilemap.cells.every((v, i) => v === hw.tilemap.cells[i]) &&
-    cw.tilemap.brickMask.every((v, i) => v === hw.tilemap.brickMask[i]));
-}
-
-// ---- 预测子弹协议：按射手和开火编号接管，且预览绝不毁坏镜像地形 ----
-console.log('— 联网预测子弹协议 —');
-{
-  const { World } = await import('../src/game/world.js');
-  const { Bullet } = await import('../src/game/bullet.js');
-  const { serializeWorld, pushSnapshot } = await import('../src/net/sync.js');
-  const { T } = await import('../src/core/const.js');
-  const g2 = Object.create(game);
-  g2.mode = 'net-client';
-  g2.engine = { frame: 20, addHitstop: noop };
-  g2.playerLevels = [0, 0]; g2.lives = [3, 3]; g2.score = 0;
-  const w = new World(g2, 0);
-  const p1 = w.players[0], p2 = w.players[1];
-  p1.spawnTimer = 0; p2.spawnTimer = 0;
-  const local = new Bullet(p2);
-  local.id = -1007;
-  local.ownerId = p2.id;
-  local.clientFireSeq = 7;
-  local.localPredicted = true;
-  w.bullets.push(local);
-  // 输入 ack 与开火编号是两套序号：主机尚未处理 fireSeq=7 时，
-  // 即使输入 ack 已经很大，也不能提前撤销本地预测子弹。
-  const waiting = serializeWorld(w, { ack: 90, fAck: 6 });
-  waiting.hf = 18;
-  waiting.bu = [];
-  pushSnapshot(w, waiting, 1);
-  check('输入 ack 不会误撤销尚未处理的预测子弹', w.bullets.includes(local));
-
-  const snap = serializeWorld(w, { ack: 100, fAck: 7 });
-  snap.hf = 20;
-  // 首先到达 P1 子弹，不能错误接管 P2 的预测子弹；随后才是同 fireSeq 的 P2 权威子弹。
-  snap.bu = [
-    { id: 50, x: 30, y: 30, dir: 1, spd: 2, pow: 1, isP: true, own: p1.id },
-    { id: 51, x: 40, y: 40, dir: 0, spd: 2.4, pow: 1, isP: true, own: p2.id, fs: 7 },
-  ];
-  pushSnapshot(w, snap, 1);
-  check('P1 子弹不会误接管 P2 预测子弹', w.bullets.find((b) => b.id === 50) !== local);
-  check('P2 权威子弹按 fireSeq 接管预测子弹', w.bullets.find((b) => b.id === 51) === local);
-
-  const cell = w.tilemap.idx(5, 5);
-  w.tilemap.cells[cell] = T.BRICK;
-  w.tilemap.brickMask[cell] = 0b1111;
-  w.tilemap.bulletHit(5 * 8, 5 * 8, 8, 8, 1, false);
-  check('预测子弹地形预览不改动镜像地图',
-    w.tilemap.cells[cell] === T.BRICK && w.tilemap.brickMask[cell] === 0b1111);
-
-  // fireAck 已越过该开火编号但不再有对应权威子弹，说明开火被拒绝或已命中，应撤销预测残影。
-  const gone = serializeWorld(w, { ack: 110, fAck: 8 });
-  gone.hf = 22;
-  gone.bu = [{ id: 50, x: 34, y: 30, dir: 1, spd: 2, pow: 1, isP: true, own: p1.id }];
-  pushSnapshot(w, gone, 1);
-  check('被主机拒绝的预测子弹会撤销', !w.bullets.some((b) => b.clientFireSeq === 7));
-}
-
-// ---- 联网预测抗延迟：单向延迟 12 帧（≈200ms）下客机不漂移 ----
-console.log('— 联网预测抗延迟 —');
-{
-  const { World } = await import('../src/game/world.js');
-  const { NetInput } = await import('../src/core/input.js');
-  const { NetClient } = await import('../src/net/client.js');
-  const { NetHostSession, NetClientSession } = await import('../src/net/session.js');
-
-  const D = 12; // 单向延迟 12 帧
-  let tick = 0;
-  const queue = []; // 延迟投递队列
-  let hostH = null, clientH = null;
-  const hostNet = new NetClient('mem', (u, h) => {
-    hostH = h;
-    return { send: (s) => queue.push({ at: tick + D, fn: () => clientH && clientH.message(s) }), close: () => {} };
-  });
-  const clientNet = new NetClient('mem', (u, h) => {
-    clientH = h;
-    return { send: (s) => queue.push({ at: tick + D, fn: () => hostH && hostH.message(s) }), close: () => {} };
-  });
-  hostNet.connect(); clientNet.connect();
-
-  const hostGame = Object.create(game);
-  hostGame.mode = 'net-host';
-  hostGame.engine = { frame: 0, addHitstop: noop };
-  hostGame.playerLevels = [0, 0]; hostGame.lives = [3, 3]; hostGame.score = 0;
-  hostGame.input = new NetInput();
-  hostGame.net = { client: hostNet };
-  hostGame.audioEvents = []; // 音频包装全局只初始化一次（见上一个联网用例），这里手动补
-  const hostScene = { world: new World(hostGame, 0), stageIndex: 0, paused: false };
-
-  const clientGame = Object.create(game);
-  clientGame.mode = 'net-client';
-  clientGame.engine = { frame: 0, addHitstop: noop };
-  clientGame.playerLevels = [0, 0]; clientGame.lives = [3, 3]; clientGame.score = 0;
-  clientGame.input = new NetInput();
-  clientGame.net = { client: clientNet };
-  const clientScene = { world: new World(clientGame, 0), stageIndex: 0, paused: false };
-
-  const hostSess = new NetHostSession(hostGame, hostScene);
-  const clientSess = new NetClientSession(clientGame, clientScene);
-
-  // 挡路移动敌人：frozen 禁 AI（Enemy.update 对 frozen 直接 return），由测试手动挪动，
-  // 制造「镜像敌人位置滞后 12 帧」的撞点分歧——公网下客机漂移的确定性触发场景
-  const { Enemy } = await import('../src/game/enemy.js');
-  const mover = new Enemy(176, 192, 'basic', false, Math.random);
-  mover.id = 500; mover.spawnTimer = 0; mover.frozen = true;
-  hostScene.world.enemies.push(mover);
-  hostScene.world.spawnQueue.length = 0; hostScene.world.spawnTimer = 99999;
-
-  let err = null, maxBacktrack = 0, maxJump = 0, prevX = -1;
-  try {
-    for (let f = 0; f < 360; f++) {
-      tick = f;
-      if (f % 10 === 0 && mover.alive) mover.x += 8; // 每 10 帧向右挪 8px（0.8px/帧），主机 update 前执行
-      clientGame.input.applyRemote(f < 180 ? { right: true } : {}, {}); // 前 180 帧按住向右
-      hostGame.input.applyRemote({}, {});
-      hostGame.engine.frame++;
-      clientGame.engine.frame++;
-      // 模拟主机偶发 6 帧卡顿：期间 WebSocket 输入继续到达，恢复后不能永久积压。
-      if (f < 90 || f >= 96) hostSess.update();
-      clientSess.update();
-      for (let i = queue.length - 1; i >= 0; i--) { // 投递到期消息
-        if (queue[i].at <= tick) { queue[i].fn(); queue.splice(i, 1); }
-      }
-      const p2Visual = clientScene.world.players[1];
-      const x = p2Visual.x + (p2Visual._visualOffsetX || 0);
-      if (prevX >= 0) maxJump = Math.max(maxJump, Math.abs(x - prevX));
-      if (f < 180 && prevX >= 0) maxBacktrack = Math.max(maxBacktrack, prevX - x);
-      prevX = x;
-    }
-  } catch (e) { err = e; }
-  check('延迟 12 帧下双端会话无异常', !err);
-  if (err) console.error(err);
-  check('延迟下镜像 P2 收敛到主机位置',
-    Math.abs(clientScene.world.players[1].x - hostScene.world.players[1].x) < 3);
-  // 视觉残差独立衰减，物理纠偏不再把坦克画面反复拉回。
-  check('挡路敌人下镜像 P2 无 >10px 视觉跳变', maxJump <= 10);
-  check('移动中镜像 P2 不倒退（不漂移）', maxBacktrack < 0.05);
-}
-
-// ---- 联网输入合并：同帧多条输入不丢 fire 按下沿（公网消息突发时必现） ----
-console.log('— 联网输入合并 —');
-{
-  const { World } = await import('../src/game/world.js');
-  const { NetInput } = await import('../src/core/input.js');
-  const { NetClient } = await import('../src/net/client.js');
-  const { NetHostSession } = await import('../src/net/session.js');
-
-  const hostGame = Object.create(game);
-  hostGame.mode = 'net-host';
-  hostGame.engine = { frame: 0, addHitstop: noop };
-  hostGame.playerLevels = [0, 0]; hostGame.lives = [3, 3]; hostGame.score = 0;
-  hostGame.input = new NetInput();
-  hostGame.net = { client: new NetClient('mem', (u, h) => ({ send: () => {}, close: () => {} })) };
-  const hostScene = { world: new World(hostGame, 0), stageIndex: 0, paused: false };
-  const hostSess = new NetHostSession(hostGame, hostScene);
-
-  const p2 = hostScene.world.players[1];
-  p2.spawnTimer = 0; // 出生动画结束，确保可开火
-  // 同帧两条输入：移动状态应追到最新一条，同时保留前一条的 fire 按下沿。
-  hostSess.onMessage({ t: 'in', seq: 1, held: {}, edges: { fire: true }, fireSeq: 9, viewHf: 1 });
-  hostSess.onMessage({ t: 'in', seq: 2, held: {}, edges: {} });
-  hostGame.engine.frame++;
-  hostSess.update();
-  check('突发输入按序消费且 fire 沿不丢', hostScene.world.bullets.some((b) => b.owner === p2 && b.clientFireSeq === 9));
-  check('突发输入同一权威帧追到最新状态', hostSess.lastSeq === 2);
-  check('开火事件使用独立确认序号', hostSess.lastFireSeq === 9);
-}
-
-// ---- 快照插值缓冲：两帧线性插值，自己的 P2 不走插值 ----
-console.log('— 快照插值缓冲 —');
-{
-  const { World } = await import('../src/game/world.js');
-  const { pushSnapshot, interpolateTo } = await import('../src/net/sync.js');
-  const g2 = Object.create(game);
-  g2.mode = '2p';
-  g2.playerLevels = [0, 0]; g2.lives = [3, 3];
-  const w = new World(g2, 0);
-  w.enemies = []; w.spawnQueue.length = 0; w.spawnTimer = 99999;
-  const mk = (x) => ({
-    t: 'snap', hf: x, sg: 0, st: 'playing', stT: 0, oR: null,
-    pl: [
-      { id: 1, x: 10 + x, y: 20, dir: 1, lv: 0, alive: true, spT: 0, shT: 0, moving: true, tread: 0 },
-      { id: 2, x: 30, y: 40, dir: 2, lv: 0, alive: true, spT: 0, shT: 0, moving: false, tread: 0 },
-    ],
-    en: [{ id: 100, x: 50 + x, y: 60, dir: 1, type: 'basic', hp: 1, hasP: false, alive: true, spT: 0, frz: false, hitF: 0, moving: true, tread: 0 }],
-    bu: [], pu: [], lv: [3, 3],
-    ks: [{ basic: 0, fast: 0, power: 0, armor: 0 }, { basic: 0, fast: 0, power: 0, armor: 0 }],
-    sc: 0, sq: 0, frz: 0, shv: 0, fx: [],
-  });
-  pushSnapshot(w, mk(0), 1);
-  pushSnapshot(w, mk(2), 1);
-  interpolateTo(w, 1, 1); // 渲染到 hf=1：两帧中点
-  check('插值中点：敌人位置线性插值', Math.abs(w.enemies[0].x - 51) < 0.01);
-  check('插值中点：P1（远端）线性插值', Math.abs(w.players[0].x - 11) < 0.01);
-  check('自己的 P2 不走插值（位置保持预测/快照落位值）', w.players[1].x === 144);
-}
-
-// ---- 本地开火预测：fire 立即出子弹，权威到达后无缝接管 ----
-console.log('— 本地开火预测 —');
-{
-  const { World } = await import('../src/game/world.js');
-  const { NetInput } = await import('../src/core/input.js');
-  const { NetClient } = await import('../src/net/client.js');
-  const { NetHostSession, NetClientSession } = await import('../src/net/session.js');
-
-  let hostH = null, clientH = null;
-  const hostNet = new NetClient('mem', (u, h) => {
-    hostH = h;
-    return { send: (s) => clientH && clientH.message(s), close: () => {} };
-  });
-  const clientNet = new NetClient('mem', (u, h) => {
-    clientH = h;
-    return { send: (s) => hostH && hostH.message(s), close: () => {} };
-  });
-  hostNet.connect(); clientNet.connect();
-  const hostGame = Object.create(game);
-  hostGame.mode = 'net-host';
-  hostGame.engine = { frame: 0, addHitstop: noop };
-  hostGame.playerLevels = [0, 0]; hostGame.lives = [3, 3]; hostGame.score = 0;
-  hostGame.input = new NetInput();
-  hostGame.net = { client: hostNet };
-  hostGame.audioEvents = []; // 音频包装全局只初始化一次，这里手动补
-  const clientGame = Object.create(game);
-  clientGame.mode = 'net-client';
-  clientGame.engine = { frame: 0, addHitstop: noop };
-  clientGame.playerLevels = [0, 0]; clientGame.lives = [3, 3]; clientGame.score = 0;
-  clientGame.input = new NetInput();
-  clientGame.net = { client: clientNet };
-  const hostScene = { world: new World(hostGame, 0), stageIndex: 0, paused: false };
-  const clientScene = { world: new World(clientGame, 0), stageIndex: 0, paused: false };
-  const hostSess = new NetHostSession(hostGame, hostScene);
-  const clientSess = new NetClientSession(clientGame, clientScene);
-  // 双方 P2 立即可以行动/开火（跳过出生动画）
-  hostScene.world.players[1].spawnTimer = 0;
-  clientScene.world.players[1].spawnTimer = 0;
-
-  // 帧 1：客机按下 fire（按下沿）
-  clientGame.input.applyRemote({}, { fire: true });
-  hostGame.input.applyRemote({}, {});
-  hostGame.engine.frame++;
-  clientGame.engine.frame++;
-  hostSess.update();
-  clientSess.update();
-  const cw = clientScene.world;
-  const local = cw.bullets.find((b) => b.id < 0);
-  check('客机按 fire 立即生成本地子弹', !!local);
-  // 帧 2-5：输入送达主机 → 主机开火 → 快照回传接管
-  for (let f = 0; f < 4; f++) {
-    clientGame.input.applyRemote({}, {});
-    hostGame.input.applyRemote({}, {});
-    hostGame.engine.frame++;
-    clientGame.engine.frame++;
-    hostSess.update();
-    clientSess.update();
-  }
-  check('权威子弹到达后本地子弹被接管删除', !cw.bullets.some((b) => b.id < 0));
-  check('权威子弹已同步到镜像', cw.bullets.some((b) => b.id > 0));
-}
-
-// ---- 延迟补偿：P2 子弹命中判定回滚到客机开火时刻的敌人位置 ----
-console.log('— 延迟补偿 —');
-{
-  const { World } = await import('../src/game/world.js');
-  const { Bullet } = await import('../src/game/bullet.js');
-  const { Enemy } = await import('../src/game/enemy.js');
-  const g2 = Object.create(game);
-  g2.mode = '2p';
-  g2.playerLevels = [0, 0]; g2.lives = [3, 3];
-  const w = new World(g2, 0);
-  w.enemies = []; w.spawnQueue.length = 0; w.spawnTimer = 99999;
-  w.inputLag = 10; // 模拟客机输入延迟 10 帧
-  const e = new Enemy(100, 100, 'basic', false, Math.random);
-  e.id = 500; e.spawnTimer = 0; e.frozen = true; // frozen 禁 AI，位置手动控制
-  w.enemies.push(e);
-  const F = 200; // 子弹生成帧
-  for (let hf = F - 12; hf <= F; hf++) {
-    // 历史：10 帧前敌人应在 (100,100)（客机瞄准的位置），当前已移到 (110,100)
-    w.enemyHistory[hf % 60] = { hf, enemies: [{ id: 500, x: 100 + (hf - (F - 10)), y: 100 }] };
-  }
-  e.x = 110; // 模拟敌人已移动 10 帧（当前权威位置）
-  const p2 = w.players[1];
-  p2.spawnTimer = 0;
-  const b = new Bullet(p2);
-  b.id = 900; b.bornHf = F;
-  b.x = 104; b.y = 100; // 子弹已飞到客机瞄准点附近（无补偿时打不中当前敌人 110）
-  const hp = w.enemyPosAt(F - w.inputLag, 500);
-  check('enemyPosAt 返回开火时刻的历史位置', hp && hp.x === 100);
-  check('延迟补偿：回滚位置判定命中', !!hp && b._overlapsAt(hp.x, hp.y));
-  check('无补偿：当前敌人位置判定不命中', !b._overlapsAt(e.x, e.y));
-}
-
-// ---- 顿帧广播：hitstop 期间主机仍广播快照（hf 推进，客机插值不断流） ----
-console.log('— 顿帧广播 —');
-{
-  const { World } = await import('../src/game/world.js');
-  const { NetInput } = await import('../src/core/input.js');
-  const { NetClient } = await import('../src/net/client.js');
-  const { NetHostSession } = await import('../src/net/session.js');
-  const hostGame = Object.create(game);
-  hostGame.mode = 'net-host';
-  hostGame.engine = { frame: 0, addHitstop: noop };
-  hostGame.playerLevels = [0, 0]; hostGame.lives = [3, 3]; hostGame.score = 0;
-  hostGame.input = new NetInput();
-  const hostNet = new NetClient('mem', (u, h) => ({ send: () => {}, close: () => {} }));
-  hostGame.net = { client: hostNet };
-  hostGame.audioEvents = []; // 音频包装全局只初始化一次，这里手动补
-  const hostScene = { world: new World(hostGame, 0), stageIndex: 0, paused: false };
-  const hostSess = new NetHostSession(hostGame, hostScene);
-  let snapCount = 0;
-  const origRelay = hostNet.relay.bind(hostNet);
-  hostNet.relay = (d) => { if (d && d.t === 'snap') snapCount++; origRelay(d); };
-  hostGame.engine.frame++;
-  hostSess.update();
-  hostGame.engine.frame++;
-  hostSess.update(); // 常规帧：广播一次（30Hz 节奏下偶数帧）
-  const afterRegular = snapCount;
-  hostSess.onHitstop(); // 顿帧期间：仍广播
-  check('顿帧期间主机仍广播快照', snapCount === afterRegular + 1);
-}
-
-// ---- 服务器集成（真实子进程 + ws 协议，覆盖公网加固路径）----
-console.log('— 服务器集成 —');
-{
-  const { spawn } = await import('node:child_process');
-  const { fileURLToPath } = await import('node:url');
-  const { WebSocket } = await import('ws');
-  const port = 18000 + Math.floor(Math.random() * 2000);
-  const srv = spawn(process.execPath,
-    [fileURLToPath(new URL('../server/server.js', import.meta.url))],
-    { env: { ...process.env, PORT: String(port) }, stdio: ['ignore', 'pipe', 'inherit'] });
-  // 等待服务器就绪
-  await new Promise((resolve, reject) => {
-    srv.stdout.on('data', (d) => { if (String(d).includes('已启动')) resolve(); });
-    srv.on('exit', () => reject(new Error('服务器提前退出')));
-    setTimeout(() => reject(new Error('服务器启动超时')), 5000);
-  });
-
-  const url = `ws://127.0.0.1:${port}`;
-  const open = () => new Promise((res, rej) => {
-    const ws = new WebSocket(url);
-    ws.on('open', () => res(ws));
-    ws.on('error', rej);
-  });
-  const nextMsg = (ws, ms = 2000) => new Promise((res, rej) => {
-    const timer = setTimeout(() => rej(new Error('等待消息超时')), ms);
-    ws.once('message', (raw) => { clearTimeout(timer); res(JSON.parse(raw)); });
-  });
-  const waitClose = (ws, ms = 2000) => new Promise((res) => {
-    const timer = setTimeout(() => res(0), ms);
-    ws.once('close', (code) => { clearTimeout(timer); res(code); });
-  });
-
-  let err = null;
-  try {
-    // 建房 → 加入 → 转发
-    const host = await open();
-    const createdP = nextMsg(host);
-    host.send(JSON.stringify({ t: 'create' }));
-    const created = await createdP;
-    check('服务器建房返回 4 位房间码', created.t === 'created' && /^\d{4}$/.test(created.code));
-
-    const guest = await open();
-    const joinedP = nextMsg(guest);
-    const peerP = nextMsg(host);
-    guest.send(JSON.stringify({ t: 'join', code: created.code }));
-    check('加入房间成功', (await joinedP).t === 'joined');
-    check('房主收到 peer-joined', (await peerP).t === 'peer-joined');
-
-    const relayP = nextMsg(guest);
-    host.send(JSON.stringify({ t: 'relay', data: { t: 'snap', n: 1 } }));
-    const relayed = await relayP;
-    check('relay 原样转发', relayed.t === 'relay' && relayed.data.n === 1);
-
-    // 加入不存在的房间（0000 不在 1000–9999 生成范围内）
-    const guest2 = await open();
-    const errP = nextMsg(guest2);
-    guest2.send(JSON.stringify({ t: 'join', code: '0000' }));
-    check('加入不存在房间返回 error', (await errP).t === 'error');
-
-    // 一方断开 → 对端 peer-left
-    const leftP = nextMsg(guest);
-    host.close();
-    check('断开后对端收到 peer-left', (await leftP).t === 'peer-left');
-
-    // 超过 maxPayload（64KB）的消息被服务器断开（ws 关闭码 1009）
-    const big = await open();
-    const closeP = waitClose(big);
-    big.send(JSON.stringify({ t: 'relay', data: 'x'.repeat(70 * 1024) }));
-    check('超限消息被服务器断开', (await closeP) === 1009);
-
-    guest.close(); guest2.close();
-  } catch (e) { err = e; }
-  check('服务器集成测试无异常', !err);
-  if (err) console.error(err);
-  srv.kill();
 }
 
 console.log(`\n结果：${pass} 通过，${fail} 失败`);

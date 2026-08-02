@@ -1,11 +1,10 @@
 // 联网对战大厅：创建房间（显示房间码等待好友）/ 输入房间码加入
-// 配对成功后：房主作为主机（P1）、加入者作为客机（P2），进入合作闯关
+// 配对成功后：创建者使用 P1、加入者使用 P2；完整游戏逻辑统一在服务器运行
 import { LOGICAL_W, LOGICAL_H } from '../core/const.js';
 import { drawText } from '../core/text.js';
 import { TitleScene } from './title.js';
-import { IntroScene } from './intro.js';
 import { NetClient, defaultServerUrl } from '../net/client.js';
-import { NetHostSession, NetClientSession } from '../net/session.js';
+import { NetGameController } from '../net/session.js';
 
 export class LobbyScene {
   constructor(game) {
@@ -17,7 +16,7 @@ export class LobbyScene {
     this.roomCode = '';    // 创建成功的房间码
     this.error = '';
     this.client = null;
-    this.role = null;      // host | guest
+    this.created = null;
     this._digitHandler = null;
   }
 
@@ -45,15 +44,15 @@ export class LobbyScene {
 
   _connect(asHost) {
     this.error = '';
-    this.role = asHost ? 'host' : 'guest';
     const client = new NetClient(defaultServerUrl());
     this.client = client;
     client.on('created', (m) => {
       this.roomCode = m.code;
+      this.created = m;
       this.phase = 'wait'; // 等待好友加入
     });
-    client.on('peer-joined', () => this._startGame());
-    client.on('joined', () => this._startGame());
+    client.on('peer-joined', (m) => this._startGame(m));
+    client.on('joined', (m) => this._startGame(m));
     client.on('error', (m) => {
       this.error = m.msg || '加入失败';
       this.phase = 'menu';
@@ -72,20 +71,11 @@ export class LobbyScene {
     });
   }
 
-  _startGame() {
+  _startGame(welcome) {
     const game = this.game;
     const client = this.client;
-    const isHost = this.role === 'host';
-    game.mode = isHost ? 'net-host' : 'net-client';
-    game.net = {
-      client,
-      createGameSession(scene) {
-        return isHost ? new NetHostSession(game, scene) : new NetClientSession(game, scene);
-      },
-    };
-    game.resetRun();
-    game.audio.stopBgm();
-    game.engine.changeScene(new IntroScene(game, 0)); // 联机固定从第 1 关开始
+    const controller = new NetGameController(game, client, welcome || this.created);
+    controller.activate();
   }
 
   update() {
@@ -162,10 +152,10 @@ export class LobbyScene {
       if (this.error) {
         drawText(dctx, this.error, cx, 158, { size: 8, align: 'center', color: '#f04838', shadow: null });
       }
-      drawText(dctx, '合作闯关：房主为 P1，加入者为 P2', cx, 182, {
+      drawText(dctx, '合作闯关：创建者为 P1，加入者为 P2', cx, 182, {
         size: 7, align: 'center', color: '#888888', shadow: null,
       });
-      // 当前连接的中继服务器地址（可用 ?server=ws://host:port 指定）
+      // 当前连接的权威服务器地址（可用 ?server=ws://host:port 指定）
       drawText(dctx, '服务器：' + defaultServerUrl(), cx, 200, {
         size: 6, align: 'center', color: '#666677', shadow: null,
       });

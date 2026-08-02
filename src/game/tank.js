@@ -30,12 +30,17 @@ export class Tank {
   center() { return { x: this.x + this.w / 2, y: this.y + this.h / 2 }; }
 
   // 转向并对齐到 1/4 格网格（2px，比原版 4px 手感更精细）
-  setDir(d) {
+  setDir(d, world = null) {
     if (this.dir === d) return;
     this.dir = d;
     const snap = 2;
-    if (d === 0 || d === 2) this.x = Math.round(this.x / snap) * snap;
-    else this.y = Math.round(this.y / snap) * snap;
+    const x = d === 0 || d === 2 ? Math.round(this.x / snap) * snap : this.x;
+    const y = d === 1 || d === 3 ? Math.round(this.y / snap) * snap : this.y;
+    // 对齐本身也可能把坦克挤进邻居，只有落点仍可通行时才更新坐标。
+    if (!world || this._canEnter(world, x, y)) {
+      this.x = x;
+      this.y = y;
+    }
   }
 
   // 尝试沿当前方向移动一帧；被阻挡返回 false
@@ -93,6 +98,7 @@ export class Tank {
   paletteName() { return 'basic'; } // 子类覆盖
 
   render(ctx, assets, frame) {
+    if (!this.alive) return;
     if (this.spawnTimer > 0) {
       // 出生法阵动画
       const f = Math.floor((32 - this.spawnTimer) / 8) % 4;
@@ -100,9 +106,8 @@ export class Tank {
       return;
     }
     const sprite = assets.tanks[this.paletteName()][this.dir][(this.treadFrame >> 3) & 1];
-    // 联网客机的纠偏残差只影响画面，不污染移动和碰撞使用的权威坐标。
-    const px = FIELD_X + this.x + (this._visualOffsetX || 0);
-    const py = FIELD_Y + this.y + (this._visualOffsetY || 0);
+    const px = FIELD_X + this.x;
+    const py = FIELD_Y + this.y;
     if (this.hitFlash > 0) {
       // 受击白闪
       ctx.save();

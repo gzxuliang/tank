@@ -38,11 +38,17 @@ export class Player extends Tank {
 
   update(world, input) {
     this.tickTimers();
-    if (!this.alive || this.spawnTimer > 0) return;
+    this.applyControl(world, input);
+  }
+
+  // 执行一条玩家操作；联网服务器和客户端预测必须共用同一套移动规则。
+  // 世界计时由 update 或权威世界单独推进，重放输入时不能重复扣计时器。
+  applyControl(world, input, allowFire = true) {
+    if (!this.alive || this.spawnTimer > 0) return false;
 
     const d = input.dirHeld();
     if (d >= 0) {
-      this.setDir(d);
+      this.setDir(d, world);
       this.tryMove(world);
       this.slideTimer = 0;
       // 记录冰面滑行方向
@@ -55,7 +61,7 @@ export class Player extends Tank {
       // 冰面打滑：松开后继续滑一小段
       if (this.slideTimer > 0) {
         this.slideTimer--;
-        this.setDir(this.slideDir);
+        this.setDir(this.slideDir, world);
         const bak = this.speed;
         this.speed = bak * 0.7;
         this.tryMove(world);
@@ -63,10 +69,12 @@ export class Player extends Tank {
       }
     }
 
-    if (input.pressed('fire') && this.canFire(world)) {
+    if (allowFire && input.pressed('fire') && this.canFire(world)) {
       world.spawnBullet(this);
       world.audio.shoot();
+      return true;
     }
+    return false;
   }
 
   die(world) {
