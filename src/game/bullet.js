@@ -9,21 +9,26 @@ export class Bullet {
     this.owner = owner;
     this.isPlayerBullet = owner.isPlayer;
     this.dir = owner.dir;
-    this.speed = owner.bulletSpeed;
+    this.speed = owner.bulletSpeed * (owner.giant ? 1.6 : 1); // 巨型射导弹：飞行更快
     this.power = owner.bulletPower;
+    this.big = !!owner.giant; // 巨型坦克射导弹（更大弹体、命中范围与爆炸威力）
     const m = owner.muzzle();
     this.x = m.x; // 中心点，战场局部坐标
     this.y = m.y;
     this.alive = true;
   }
 
-  // 命中判定矩形：沿飞行方向 4px，垂直方向 8px（破坏砖墙的条带宽度）
+  // 弹体碰撞尺寸（导弹更大）
+  get size() { return this.big ? 6 : BULLET_SIZE; }
+
+  // 命中判定矩形：沿飞行方向一个弹体，垂直方向条带（普通 8px / 导弹 12px，破坏砖墙的范围）
   hitRect() {
-    const s = BULLET_SIZE / 2;
+    const s = this.size / 2;
+    const wide = this.big ? 12 : 8;
     if (this.dir === 0 || this.dir === 2) {
-      return { x: this.x - 4, y: this.y - s, w: 8, h: BULLET_SIZE };
+      return { x: this.x - wide / 2, y: this.y - s, w: wide, h: this.size };
     }
-    return { x: this.x - s, y: this.y - 4, w: BULLET_SIZE, h: 8 };
+    return { x: this.x - s, y: this.y - wide / 2, w: this.size, h: wide };
   }
 
   update(world) {
@@ -42,25 +47,25 @@ export class Bullet {
     if (this.x < 0 || this.x > FIELD_LIMIT || this.y < 0 || this.y > FIELD_LIMIT) {
       this.x = Math.max(0, Math.min(FIELD_LIMIT, this.x));
       this.y = Math.max(0, Math.min(FIELD_LIMIT, this.y));
-      world.bulletExplode(this, false);
+      if (this.big) world.shellBlast(this); else world.bulletExplode(this, false);
       return;
     }
     // 地形
     const r = this.hitRect();
     const hit = world.tilemap.bulletHit(r.x, r.y, r.w, r.h, this.power);
     if (hit.result === 'base') {
-      world.bulletExplode(this, true);
+      // 导弹命中基地：爆炸范围与基地损毁一并结算
+      if (this.big) world.shellBlast(this);
+      else world.bulletExplode(this, true);
       world.baseDestroyed();
       return;
     }
-    if (hit.result === 'brick') {
-      world.audio.hitWall();
-      world.bulletExplode(this, false);
-      return;
-    }
-    if (hit.result === 'steel') {
-      world.audio.hitSteel();
-      world.bulletExplode(this, false);
+    if (hit.result === 'brick' || hit.result === 'steel') {
+      if (this.big) world.shellBlast(this); // 导弹炸开一片
+      else {
+        if (hit.result === 'steel') world.audio.hitSteel(); else world.audio.hitWall();
+        world.bulletExplode(this, false);
+      }
       return;
     }
     // 坦克
@@ -78,8 +83,13 @@ export class Bullet {
           if (hp) { ox = hp.x; oy = hp.y; } // 历史缺失时回退当前
         }
         if (this._overlapsAt(ox, oy)) {
-          world.bulletExplode(this, false);
-          world.enemyHit(e, this);
+          if (this.big) {
+            world.enemyHit(e, this, 2); // 导弹直击 2 点伤害
+            world.shellBlast(this);
+          } else {
+            world.bulletExplode(this, false);
+            world.enemyHit(e, this);
+          }
           return;
         }
       }
@@ -105,16 +115,19 @@ export class Bullet {
   }
 
   _overlaps(t) {
-    return this._overlapsAt(t.x, t.y);
+    return this._overlapsAt(t.x, t.y, t.w);
   }
 
-  _overlapsAt(x, y) {
-    const s = BULLET_SIZE / 2;
-    return this.x + s > x && this.x - s < x + TANK_SIZE &&
-           this.y + s > y && this.y - s < y + TANK_SIZE;
+  // size：目标碰撞边长（巨型玩家坦克更大；敌坦走默认 TANK_SIZE）
+  _overlapsAt(x, y, size = TANK_SIZE) {
+    const s = this.size / 2;
+    return this.x + s > x && this.x - s < x + size &&
+           this.y + s > y && this.y - s < y + size;
   }
 
   render(ctx, assets) {
+    // 巨型坦克的导弹：方向感弹体（尾焰朝后）
+    if (this.big) { blit(ctx, assets.missile[this.dir], FIELD_X + this.x - 6, FIELD_Y + this.y - 6); return; }
     blit(ctx, assets.bullet, FIELD_X + this.x - 3, FIELD_Y + this.y - 3);
   }
 }

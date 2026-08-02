@@ -3,7 +3,7 @@
 import {
   PLAYER_SPAWN, PLAYER2_SPAWN, ENEMY_SPAWNS, TILE, MAX_ON_FIELD,
   FREEZE_TIME, SHOVEL_TIME, SHOVEL_BLINK_TIME, POWERUP_SCORE,
-  FIELD_X, FIELD_Y, FIELD_SIZE,
+  FIELD_X, FIELD_Y, FIELD_SIZE, STUN_TIME, T, MUSHROOM_RATE,
 } from '../core/const.js';
 import { TileMap } from './tilemap.js';
 import { Player } from './player.js';
@@ -17,6 +17,17 @@ import { buildSpawnQueue, LEVELS } from './levels.js';
 
 const SCORE_COLORS = { basic: '#f0f0f0', fast: '#68d8f0', power: '#78d8c0', armor: '#f0a048' };
 const SPAWNS = [PLAYER_SPAWN, PLAYER2_SPAWN];
+
+// 道具效果名称（拾取飘字；联机经 fxEvents 快照同步给远端，见 sync.js 的 'ft' 分支）
+const POWERUP_LABEL = {
+  star: ['升级!', '#ffe040'],
+  helmet: ['护盾!', '#68d8f0'],
+  grenade: ['全灭!', '#f8a028'],
+  life: ['+1UP', '#68d858'],
+  shovel: ['钢墙!', '#e8e8e8'],
+  clock: ['冻结!', '#68d8f0'],
+  mushroom: ['变大!', '#f06858'],
+};
 
 export class World {
   constructor(game, stageIndex) {
@@ -282,9 +293,15 @@ export class World {
         if (!b.alive) continue;
         if (Math.abs(a.x - b.x) < 4 && Math.abs(a.y - b.y) < 4) {
           a.alive = false; b.alive = false;
-          this.explosions.push(new Explosion((a.x + b.x) / 2, (a.y + b.y) / 2, false));
-          this.fxEvents.push({ k: 'ex', x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, big: false });
-          this.audio.hitWall();
+          const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+          if (a.big) {
+            // 导弹与敌弹相撞同样引爆
+            this.shellBlast({ x: mx, y: my, power: Math.max(a.power, b.power), owner: a.owner });
+          } else {
+            this.explosions.push(new Explosion(mx, my, false));
+            this.fxEvents.push({ k: 'ex', x: mx, y: my, big: false });
+            this.audio.hitWall();
+          }
           break;
         }
       }
@@ -299,8 +316,44 @@ export class World {
     this.particles.spark(bullet.x, bullet.y);
   }
 
-  enemyHit(e, bullet) {
-    const killed = e.hit(this);
+  // 导弹爆炸：3×3 砖墙粉碎 + 半径内敌坦溅射（2 点伤害），威力远超普通子弹
+  // 基地不在范围判定内（防友军导弹误炸老家直接判负）；钢墙只有三星火力才破
+  shellBlast(bullet) {
+    bullet.alive = false;
+    const cx = bullet.x, cy = bullet.y;
+    const tm = this.tilemap;
+    let smashed = 0;
+    for (let ty = Math.floor((cy - 12) / TILE); ty <= Math.floor((cy + 12) / TILE); ty++) {
+      for (let tx = Math.floor((cx - 12) / TILE); tx <= Math.floor((cx + 12) / TILE); tx++) {
+        if (!tm.inMap(tx, ty)) continue;
+        const i = tm.idx(tx, ty);
+        if (tm.cells[i] === T.BRICK && tm.brickMask[i] !== 0) {
+          tm.brickMask[i] = 0; tm.cells[i] = T.EMPTY; tm._dirty = true; smashed++;
+        } else if (tm.cells[i] === T.STEEL && bullet.power >= 3) {
+          tm.cells[i] = T.EMPTY; tm._dirty = true; smashed++;
+        }
+      }
+    }
+    // 半径内敌坦溅射（直击的敌方已被 bullet._collide 先行结算）
+    const radius = 28;
+    for (const e of this.enemies) {
+      if (!e.alive || e.spawnTimer > 0) continue;
+      const ex = e.x + e.w / 2, ey = e.y + e.h / 2;
+      if ((ex - cx) * (ex - cx) + (ey - cy) * (ey - cy) > radius * radius) continue;
+      this.enemyHit(e, bullet, 2);
+    }
+    // 特效：大爆炸 + 震屏 + 顿帧
+    this.explosions.push(new Explosion(cx, cy, true));
+    this.fxEvents.push({ k: 'ex', x: cx, y: cy, big: true });
+    this.particles.burst(cx, cy, { count: 22, colors: ['#fff0c0', '#ffb040', '#e86818', '#5a5a5a'], speed: 2.6, life: 40 });
+    this.shake.add(5, 30);
+    this.game.engine.addHitstop(4);
+    this.audio.explodeBig();
+    if (smashed > 0) this.audio.hitWall();
+  }
+
+  enemyHit(e, bullet, dmg = 1) {
+    const killed = e.hit(this, dmg);
     if (!killed) return;
     // 击杀归属：玩家子弹按射手 slot 记账，其余（流弹）归 P1
     const slot = bullet && bullet.owner && bullet.owner.isPlayer ? bullet.owner.slot : 0;
@@ -321,6 +374,23 @@ export class World {
   playerHit(bullet, p) {
     if (p.shieldTimer > 0) {
       this.particles.spark(bullet.x, bullet.y);
+      return;
+    }
+    // 合作误伤：队友子弹只定身不致死（FC 原版规则），命数与等级不受影响
+    if (bullet.owner && bullet.owner.isPlayer) {
+      p.stunTimer = STUN_TIME;
+      p.hitFlash = 8;
+      p.moving = false;
+      p.slideTimer = 0;
+      this.particles.spark(bullet.x, bullet.y);
+      this.audio.hitTank();
+      return;
+    }
+    // 巨型坦克被敌方击中：缩回普通大小而不是阵亡（马力欧蘑菇规则）
+    if (p.giant) {
+      p.shrinkFromGiant();
+      this.particles.spark(bullet.x, bullet.y);
+      this.audio.hitTank();
       return;
     }
     const i = p.slot;
@@ -367,7 +437,9 @@ export class World {
   // ---- 道具 ----
   _dropPowerup() {
     this.powerups = []; // 场上只保留一个道具（仿原版）
-    const type = POWERUP_TYPES[Math.floor(this.rand() * POWERUP_TYPES.length)];
+    // 蘑菇（变大）掉率低于其他道具，其余六种均分剩余概率
+    const type = this.rand() < MUSHROOM_RATE ? 'mushroom'
+      : POWERUP_TYPES[Math.floor(this.rand() * POWERUP_TYPES.length)];
     const pos = this.tilemap.randomEmptySpot(this.rand);
     const pu = new PowerUp(pos.x, pos.y, type);
     pu.id = this.nextId++;
@@ -380,6 +452,10 @@ export class World {
     this.game.addScore(POWERUP_SCORE);
     this.floatTexts.push(new FloatText(p.x + 8, p.y, '+' + POWERUP_SCORE, '#f8c820'));
     this.fxEvents.push({ k: 'ft', x: p.x + 8, y: p.y, text: '+' + POWERUP_SCORE, color: '#f8c820' });
+    // 拾取时额外飘出效果名称，一眼认出吃到了什么
+    const [label, labelColor] = POWERUP_LABEL[p.type];
+    this.floatTexts.push(new FloatText(p.x + 8, p.y - 8, label, labelColor));
+    this.fxEvents.push({ k: 'ft', x: p.x + 8, y: p.y - 8, text: label, color: labelColor });
     this.audio.powerupPick();
     switch (p.type) {
       case 'star':
@@ -417,17 +493,48 @@ export class World {
         for (const e of this.enemies) e.frozen = true;
         this.audio.freeze();
         break;
+      case 'mushroom':
+        player.becomeGiant(this);
+        break;
     }
+  }
+
+  // 巨型坦克撞碎身下压着的砖墙（联机经地形快照同步，音效走音频事件）
+  _smashBricks(tank) {
+    const tm = this.tilemap;
+    const x0 = Math.floor(tank.x / TILE), x1 = Math.floor((tank.x + tank.w - 0.01) / TILE);
+    const y0 = Math.floor(tank.y / TILE), y1 = Math.floor((tank.y + tank.h - 0.01) / TILE);
+    let smashed = 0;
+    for (let ty = y0; ty <= y1; ty++) {
+      for (let tx = x0; tx <= x1; tx++) {
+        if (!tm.inMap(tx, ty)) continue;
+        const i = tm.idx(tx, ty);
+        if (tm.cells[i] === T.BRICK && tm.brickMask[i] !== 0) {
+          tm.brickMask[i] = 0;
+          tm.cells[i] = T.EMPTY;
+          tm._dirty = true;
+          smashed++;
+        }
+      }
+    }
+    if (smashed > 0) {
+      this.audio.hitWall();
+      const c = tank.center();
+      this.particles.burst(c.x, c.y, {
+        count: 8, colors: ['#c86828', '#8a3c10', '#f0a050'], speed: 1.4, life: 18,
+      });
+    }
+    return smashed;
   }
 
   // ---- 渲染 ----
   // 坦克/道具底部的柔和投影，增强立体感
-  _shadow(ctx, x, y) {
+  _shadow(ctx, x, y, size = 16) {
     ctx.save();
     ctx.globalAlpha = 0.32;
     ctx.fillStyle = '#000000';
     ctx.beginPath();
-    ctx.ellipse(FIELD_X + x + 8, FIELD_Y + y + 14.2, 6.4, 1.9, 0, 0, Math.PI * 2);
+    ctx.ellipse(FIELD_X + x + size / 2, FIELD_Y + y + size - 1.8, size * 0.4, 1.9, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }
@@ -442,10 +549,10 @@ export class World {
     this.tilemap.renderGround(ctx, assets, this.game.engine.frame);
     for (const p of this.powerups) if (p.alive) this._shadow(ctx, p.x, p.y);
     for (const p of this.powerups) p.render(ctx, assets, this.game.engine.frame);
-    for (const e of this.enemies) if (e.alive && e.spawnTimer <= 0) this._shadow(ctx, e.x, e.y);
+    for (const e of this.enemies) if (e.alive && e.spawnTimer <= 0) this._shadow(ctx, e.x, e.y, e.w);
     for (const e of this.enemies) if (e.alive) e.render(ctx, assets, this.game.engine.frame);
     for (const pl of this.players) {
-      if (pl.alive && pl.spawnTimer <= 0) this._shadow(ctx, pl.x, pl.y);
+      if (pl.alive && pl.spawnTimer <= 0) this._shadow(ctx, pl.x, pl.y, pl.w);
       if (pl.alive) pl.render(ctx, assets, this.game.engine.frame);
     }
     for (const b of this.bullets) b.render(ctx, assets);

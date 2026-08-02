@@ -1,4 +1,4 @@
-// 道具：生成、闪烁、拾取效果（⭐升级 🛡无敌 💣清屏 🚜加命 🔧钢墙 ⏱冻结）
+// 道具：生成、闪烁、拾取效果（⭐升级 🛡护盾 💣清屏 🚜加命 🧱钢墙 ⏱冻结 🍄变大）
 import { POWERUP_LIFE, FIELD_X, FIELD_Y } from '../core/const.js';
 import { blit } from '../core/assets.js';
 

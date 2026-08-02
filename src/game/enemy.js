@@ -76,9 +76,9 @@ export class Enemy extends Tank {
     }
   }
 
-  // 被玩家子弹命中；返回 true 表示被击毁
-  hit(world) {
-    this.hp--;
+  // 被玩家子弹命中；dmg 支持炮弹溅射（一次多段伤害）；返回 true 表示被击毁
+  hit(world, dmg = 1) {
+    this.hp -= dmg;
     if (this.hp <= 0) {
       this.alive = false;
       return true;

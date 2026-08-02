@@ -37,6 +37,7 @@ export function serializeWorld(world, extra = {}) {
     pl: world.players.map((p) => ({
       id: p.id, x: p.x, y: p.y, dir: p.dir, lv: p.level,
       alive: p.alive, spT: p.spawnTimer, shT: p.shieldTimer,
+      stT: p.stunTimer || 0, g: p.giant ? 1 : 0,
       moving: p.moving, tread: p.treadFrame, slT: p.slideTimer || 0, slD: p.slideDir ?? p.dir,
     })),
     en: world.enemies.map((e) => ({
@@ -46,6 +47,7 @@ export function serializeWorld(world, extra = {}) {
     })),
     bu: world.bullets.map((b) => ({
       id: b.id, x: b.x, y: b.y, dir: b.dir, spd: b.speed, pow: b.power, isP: b.isPlayerBullet,
+      big: b.big ? 1 : 0,
       own: b.ownerId ?? (b.owner && b.owner.id), fs: b.clientFireSeq, fe: b.clientFireEpoch,
     })),
     pu: world.powerups.map((p) => ({ id: p.id, x: p.x, y: p.y, type: p.type })),
@@ -198,6 +200,10 @@ function syncPlayers(world, list, selfSlot) {
     lerpEntity(p, s.x, s.y, true, s.alive && s.spT <= 0);
     p.level = s.lv; p._applyLevel();
     p.alive = s.alive; p.spawnTimer = s.spT; p.shieldTimer = s.shT;
+    p.stunTimer = s.stT || 0; // 定身是权威状态，自己也要照抄（预测重放依赖它）
+    // 巨型同样是权威状态：移动碰撞按尺寸分叉，预测必须与权威一致
+    p.giant = !!s.g;
+    p._applyGiantState();
     if (!isSelf || !s.alive || s.spT > 0) {
       p.dir = s.dir; p.moving = s.moving; p.treadFrame = s.tread;
       p.slideTimer = s.slT || 0; p.slideDir = s.slD ?? s.dir;
@@ -244,6 +250,7 @@ function syncBullets(world, list, selfId) {
     if (!keepPrediction) { b.x = s.x; b.y = s.y; }
     b.dir = s.dir;
     b.speed = s.spd; b.power = s.pow; b.isPlayerBullet = s.isP;
+    b.big = !!s.big;
     b.ownerId = s.own;
     b.clientFireEpoch = s.fe;
     b.owner = world.players.find((p) => p.id === s.own) || null;

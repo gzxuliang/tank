@@ -1,4 +1,4 @@
-// 得分飘字（+100/+500）：上升并淡出
+// 得分飘字（+100/+500）与道具效果名称飘字（升级!/护盾! 等）：上升并淡出
 // 在显示分辨率层绘制（renderText），保证文字锐利
 import { FIELD_X, FIELD_Y, SCALE } from '../core/const.js';
 
@@ -23,7 +23,7 @@ export class FloatText {
     const alpha = Math.min(1, this.timer / 25);
     dctx.save();
     dctx.globalAlpha = alpha;
-    dctx.font = 'bold 21px "Consolas", monospace';
+    dctx.font = 'bold 21px "Consolas", "Microsoft YaHei", "PingFang SC", sans-serif';
     dctx.textAlign = 'center';
     dctx.textBaseline = 'middle';
     const px = (FIELD_X + this.x) * SCALE + ox;

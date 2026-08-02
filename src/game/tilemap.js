@@ -102,7 +102,8 @@ export class TileMap {
   }
 
   // ---- 坦克通行判定（像素矩形，战场局部坐标系不含 FIELD 偏移）----
-  isSolidForTank(x, y, w, h) {
+  // ignoreBricks：巨型坦克专用，砖墙视为可通行（进入后由世界撞碎）
+  isSolidForTank(x, y, w, h, ignoreBricks = false) {
     if (x < 0 || y < 0 || x + w > MAP_W * TILE || y + h > MAP_H * TILE) return true;
     const x0 = Math.floor(x / TILE), x1 = Math.floor((x + w - 0.01) / TILE);
     const y0 = Math.floor(y / TILE), y1 = Math.floor((y + h - 0.01) / TILE);
@@ -110,7 +111,7 @@ export class TileMap {
       for (let tx = x0; tx <= x1; tx++) {
         const c = this.cellAt(tx, ty);
         if (c === T.STEEL || c === T.WATER) return true;
-        if (c === T.BRICK && this.brickMask[this.idx(tx, ty)] !== 0) return true;
+        if (!ignoreBricks && c === T.BRICK && this.brickMask[this.idx(tx, ty)] !== 0) return true;
       }
     }
     // 基地永远不可通行

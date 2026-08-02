@@ -75,8 +75,8 @@ function circle(g, x, y, r) {
 }
 
 // ---- 坦克绘制（16×16，朝上）----
-// palette: {track, tread, body, dark, accent, turret}
-function drawTankSprite(p, frame) {
+// palette: {track, tread, body, dark, accent, turret}；big：蘑菇巨型形态（粗炮管 + 炮塔星徽）
+function drawTankSprite(p, frame, big = false) {
   return makeCanvas(16, 16, (g) => {
     // 履带（左右两条，圆角 + 纵向渐变）
     for (const tx of [0.2, 12.8]) {
@@ -104,11 +104,13 @@ function drawTankSprite(p, frame) {
     // 车身侧面细节缝
     g.strokeStyle = shade(p.body, -40); g.lineWidth = 0.35;
     g.beginPath(); g.moveTo(4.2, 6); g.lineTo(4.2, 12.5); g.moveTo(11.8, 6); g.lineTo(11.8, 12.5); g.stroke();
-    // 炮管（先画，让炮塔压住根部）：金属横向渐变 + 炮口环
-    g.fillStyle = lgrad(g, 7, 0, 9, 0, [[0, shade(p.dark, 10)], [0.5, shade(p.dark, 70)], [1, shade(p.dark, 10)]]);
-    rr(g, 7, 0.3, 2, 6.8, 0.8); g.fill();
+    // 炮管（先画，让炮塔压住根部）：金属横向渐变 + 炮口环；巨型加粗
+    const bw = big ? 3.4 : 2;
+    g.fillStyle = lgrad(g, 8 - bw / 2, 0, 8 + bw / 2, 0, [[0, shade(p.dark, 10)], [0.5, shade(p.dark, 70)], [1, shade(p.dark, 10)]]);
+    rr(g, 8 - bw / 2, 0.3, bw, 6.8, 0.8); g.fill();
     g.fillStyle = shade(p.dark, -35);
-    rr(g, 6.7, 0.3, 2.6, 1.3, 0.5); g.fill();
+    if (big) { rr(g, 6, 0.3, 4, 1.6, 0.5); g.fill(); }
+    else { rr(g, 6.7, 0.3, 2.6, 1.3, 0.5); g.fill(); }
     // 炮塔：半球形径向渐变
     const tc = p.turret || p.body;
     g.fillStyle = rgrad(g, 6.8, 7.2, 0.5, 8, 9, 4.4, [[0, shade(tc, 45)], [0.65, tc], [1, shade(tc, -35)]]);
@@ -118,6 +120,12 @@ function drawTankSprite(p, frame) {
     // 炮塔顶部高光点
     g.fillStyle = 'rgba(255,255,255,0.5)';
     circle(g, 7, 7.6, 0.8); g.fill();
+    // 巨型形态：炮塔星徽（辨识度）
+    if (big) {
+      starPath(g, 8, 9.1, 1.9, 0.8);
+      g.fillStyle = '#fff8ec'; g.fill();
+      g.strokeStyle = shade(p.dark, -25); g.lineWidth = 0.3; g.stroke();
+    }
   });
 }
 
@@ -320,124 +328,164 @@ function drawBaseDead() {
   });
 }
 
-// ---- 道具图标（16×16，玻璃质感面板）----
-function powerupBase(g, tint) {
-  g.fillStyle = rgrad(g, 8, 5, 1, 8, 9, 11, [[0, '#333a48'], [1, '#141821']]);
-  rr(g, 0.5, 0.5, 15, 15, 2.5); g.fill();
-  // 彩色微光描边
-  g.strokeStyle = tint; g.globalAlpha = 0.85; g.lineWidth = 0.8;
-  rr(g, 0.9, 0.9, 14.2, 14.2, 2.2); g.stroke();
-  g.globalAlpha = 1;
-  // 顶部玻璃反光
-  g.fillStyle = 'rgba(255,255,255,0.14)';
-  rr(g, 2, 1.6, 12, 5, 2); g.fill();
+// ---- 道具图标（16×16，透明底高对比符号，一眼认出效果）----
+// 五角星路径（外接圆半径 rO，内凹半径 rI，顶点朝上）
+function starPath(g, cx, cy, rO, rI) {
+  g.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? rO : rI;
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+    if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+  }
+  g.closePath();
 }
 
+// 升级：金色五角星
 function drawStar() {
   return makeCanvas(16, 16, (g) => {
-    powerupBase(g, '#f8c820');
-    g.save();
-    g.shadowColor = '#ffb020'; g.shadowBlur = 2.5;
-    g.fillStyle = lgrad(g, 8, 2.5, 8, 13.5, [[0, '#fff0a8'], [0.5, '#f8c820'], [1, '#d89010']]);
-    g.beginPath();
-    g.moveTo(8, 2.5); g.lineTo(9.6, 6.4); g.lineTo(13.5, 8); g.lineTo(9.6, 9.6);
-    g.lineTo(8, 13.5); g.lineTo(6.4, 9.6); g.lineTo(2.5, 8); g.lineTo(6.4, 6.4);
-    g.closePath(); g.fill();
-    g.restore();
-    g.fillStyle = 'rgba(255,255,255,0.75)'; circle(g, 7.2, 6.8, 0.8); g.fill();
+    starPath(g, 8, 8.4, 6.6, 2.7);
+    g.fillStyle = lgrad(g, 0, 2, 0, 15, [[0, '#fff0a0'], [0.55, '#ffd020'], [1, '#e89000']]);
+    g.fill();
+    g.strokeStyle = '#6a4400'; g.lineWidth = 0.8; g.stroke();
+    g.fillStyle = 'rgba(255,255,255,0.85)'; circle(g, 6.6, 6.2, 0.9); g.fill();
   });
 }
 
+// 护盾：白银盾牌（type 仍为 helmet）
 function drawHelmet() {
   return makeCanvas(16, 16, (g) => {
-    powerupBase(g, '#c0c8d0');
-    // 盔体：半球
-    g.fillStyle = lgrad(g, 8, 4, 8, 10, [[0, '#f2f5f9'], [0.6, '#b8c0ca'], [1, '#7e8894']]);
-    g.beginPath(); g.arc(8, 9.5, 4.5, Math.PI, 0); g.closePath(); g.fill();
-    g.strokeStyle = '#454e58'; g.lineWidth = 0.4; g.stroke();
-    // 盔檐
-    g.fillStyle = lgrad(g, 0, 9.5, 0, 11.5, [[0, '#cfd6de'], [1, '#8b95a1']]);
-    rr(g, 2.6, 9.3, 10.8, 2.2, 1); g.fill();
-    g.strokeStyle = '#454e58'; g.lineWidth = 0.35; rr(g, 2.6, 9.3, 10.8, 2.2, 1); g.stroke();
-    // 顶部棱线与高光
-    g.fillStyle = '#9aa4b0'; rr(g, 7.2, 3.6, 1.6, 2.2, 0.6); g.fill();
-    g.fillStyle = 'rgba(255,255,255,0.8)'; circle(g, 6, 6.4, 1); g.fill();
+    g.beginPath();
+    g.moveTo(8, 1.8); g.lineTo(13.6, 3.6);
+    g.quadraticCurveTo(13.6, 10.8, 8, 14.4);
+    g.quadraticCurveTo(2.4, 10.8, 2.4, 3.6);
+    g.closePath();
+    g.fillStyle = lgrad(g, 0, 1.8, 0, 14.4, [[0, '#ffffff'], [1, '#a8bcd0']]); g.fill();
+    g.strokeStyle = '#1c3a5e'; g.lineWidth = 0.9; g.stroke();
+    // 中央脊线与高光
+    g.strokeStyle = 'rgba(28,58,94,0.45)'; g.lineWidth = 0.6;
+    g.beginPath(); g.moveTo(8, 2.6); g.lineTo(8, 13.4); g.stroke();
+    g.strokeStyle = 'rgba(255,255,255,0.8)'; g.lineWidth = 0.8;
+    g.beginPath(); g.moveTo(4.6, 4.4); g.quadraticCurveTo(5.2, 7.6, 6.4, 10.2); g.stroke();
   });
 }
 
+// 清屏：圆炸弹（亮灰渐变保证黑场可见）
 function drawGrenade() {
   return makeCanvas(16, 16, (g) => {
-    powerupBase(g, '#68c068');
     // 弹体
-    g.fillStyle = rgrad(g, 6.4, 5.6, 0.5, 8, 9, 5.6, [[0, '#6cb86c'], [0.6, '#3d7a3d'], [1, '#265026']]);
-    circle(g, 8, 9.2, 4.4); g.fill();
-    g.strokeStyle = '#1a3a1a'; g.lineWidth = 0.4; circle(g, 8, 9.2, 4.4); g.stroke();
-    // 菠萝格纹路
-    g.strokeStyle = 'rgba(0,0,0,0.3)'; g.lineWidth = 0.4;
-    g.beginPath(); g.moveTo(5.6, 6.4); g.lineTo(10.4, 12); g.moveTo(10.4, 6.4); g.lineTo(5.6, 12); g.stroke();
-    // 引信与拉环
-    g.fillStyle = '#aeb6c0'; rr(g, 6.8, 2.8, 2.4, 2.2, 0.5); g.fill();
-    g.strokeStyle = '#d8dee6'; g.lineWidth = 0.7;
-    circle(g, 10.8, 3.8, 1.3); g.stroke();
+    g.fillStyle = rgrad(g, 6.2, 7, 0.8, 8, 10, 5.2, [[0, '#8a96a0'], [0.5, '#3c444c'], [1, '#181c20']]);
+    circle(g, 8, 10, 5); g.fill();
+    g.strokeStyle = '#05070a'; g.lineWidth = 0.6; circle(g, 8, 10, 5); g.stroke();
     // 高光
-    g.fillStyle = 'rgba(255,255,255,0.5)'; circle(g, 6.2, 7.2, 1); g.fill();
+    g.fillStyle = 'rgba(255,255,255,0.9)'; circle(g, 6.2, 8, 1.2); g.fill();
+    // 引信
+    g.strokeStyle = '#d8a850'; g.lineWidth = 0.9; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(8, 5.2); g.quadraticCurveTo(9.6, 3.8, 11, 2.4); g.stroke();
+    // 火花
+    starPath(g, 11.6, 2.2, 1.8, 0.7);
+    g.fillStyle = '#ffd840'; g.fill();
+    g.strokeStyle = '#a06000'; g.lineWidth = 0.3; g.stroke();
   });
 }
 
+// 加命：金色迷你坦克（玩家配色）+ 红色 +1 徽章
 function drawLife() {
   return makeCanvas(16, 16, (g) => {
-    powerupBase(g, '#e8b838');
-    // 迷你坦克
-    g.fillStyle = lgrad(g, 0, 5, 0, 12, [[0, '#8a6a18'], [1, '#5e480e']]);
-    rr(g, 3.4, 5, 2.6, 7, 1); g.fill();
-    rr(g, 10, 5, 2.6, 7, 1); g.fill();
-    g.fillStyle = lgrad(g, 0, 4.5, 0, 12, [[0, '#f8d868'], [1, '#c09020']]);
-    rr(g, 5.4, 4.5, 5.2, 7.5, 1.2); g.fill();
-    g.strokeStyle = '#6a4a08'; g.lineWidth = 0.35; rr(g, 5.4, 4.5, 5.2, 7.5, 1.2); g.stroke();
-    g.fillStyle = '#f8e8a0'; circle(g, 8, 8, 1.7); g.fill();
-    g.fillStyle = '#6a4a08'; g.fillRect(7.3, 3, 1.4, 3.6);
+    // 履带（带滚轮点）
+    for (const tx of [2.2, 10.2]) {
+      g.fillStyle = lgrad(g, tx, 0, tx + 3.2, 0, [[0, '#9a7a20'], [1, '#5a430c']]);
+      rr(g, tx, 5, 3.2, 8.4, 1.3); g.fill();
+      g.fillStyle = '#c8a030';
+      for (let y = 6.4; y < 13; y += 2.2) { circle(g, tx + 1.6, y, 0.5); g.fill(); }
+    }
+    // 车身
+    g.fillStyle = lgrad(g, 0, 4.2, 0, 13.4, [[0, '#f8d858'], [1, '#d8a020']]);
+    rr(g, 4.8, 4.4, 6.4, 9, 1.4); g.fill();
+    g.strokeStyle = '#6a4a08'; g.lineWidth = 0.5; rr(g, 4.8, 4.4, 6.4, 9, 1.4); g.stroke();
+    // 炮塔与炮管
+    g.fillStyle = '#f0d060'; circle(g, 8, 9, 2.1); g.fill();
+    g.strokeStyle = '#6a4a08'; g.lineWidth = 0.4; circle(g, 8, 9, 2.1); g.stroke();
+    g.fillStyle = '#f8d858'; g.fillRect(7.2, 3.2, 1.6, 3.6);
+    g.strokeStyle = '#6a4a08'; g.lineWidth = 0.35; g.strokeRect(7.2, 3.2, 1.6, 3.6);
+    // 红色 +1 徽章
+    g.fillStyle = '#e03828'; circle(g, 12.6, 3.6, 2.7); g.fill();
+    g.strokeStyle = '#7a1008'; g.lineWidth = 0.5; circle(g, 12.6, 3.6, 2.7); g.stroke();
+    g.fillStyle = '#ffffff'; g.font = 'bold 4.6px sans-serif';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText('+1', 12.6, 3.9);
   });
 }
 
+// 钢墙：2×2 铆钉钢块墙（type 仍为 shovel）
 function drawShovel() {
   return makeCanvas(16, 16, (g) => {
-    powerupBase(g, '#c0c8d0');
-    // 铲头
-    g.fillStyle = lgrad(g, 5, 9, 11, 14, [[0, '#eef2f6'], [1, '#8b95a1']]);
-    g.beginPath();
-    g.moveTo(5.2, 8.6); g.lineTo(10.8, 8.6); g.lineTo(9.6, 13.4); g.lineTo(6.4, 13.4);
-    g.closePath(); g.fill();
-    g.strokeStyle = '#454e58'; g.lineWidth = 0.4; g.stroke();
-    // 木柄
-    g.fillStyle = lgrad(g, 7.2, 0, 8.8, 0, [[0, '#c08848'], [1, '#8a5c28']]);
-    rr(g, 7.2, 4.2, 1.6, 5, 0.6); g.fill();
-    // D 型握把
-    g.strokeStyle = '#aeb6c0'; g.lineWidth = 0.9;
-    g.beginPath(); g.arc(8, 3.4, 1.7, Math.PI, 0); g.stroke();
-    // 铲面高光
-    g.fillStyle = 'rgba(255,255,255,0.6)'; g.fillRect(5.8, 9.2, 2, 0.7);
+    for (const [bx, by] of [[1.4, 1.4], [8.2, 1.4], [1.4, 8.2], [8.2, 8.2]]) {
+      g.fillStyle = lgrad(g, 0, by, 0, by + 6.4, [[0, '#f4f8fc'], [1, '#94a0ac']]);
+      g.fillRect(bx, by, 6.4, 6.4);
+      g.strokeStyle = '#39424b'; g.lineWidth = 0.5; g.strokeRect(bx, by, 6.4, 6.4);
+      // 中心铆钉
+      g.fillStyle = '#5a666f'; circle(g, bx + 3.2, by + 3.2, 0.7); g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.5)'; circle(g, bx + 3, by + 3, 0.25); g.fill();
+    }
   });
 }
 
+// 冻结：闹钟
 function drawClock() {
   return makeCanvas(16, 16, (g) => {
-    powerupBase(g, '#68d8f0');
     // 铃铛
-    g.fillStyle = '#f8c820';
-    circle(g, 5, 3.8, 1.5); g.fill();
-    circle(g, 11, 3.8, 1.5); g.fill();
+    g.fillStyle = '#ffd840';
+    circle(g, 4.6, 3.4, 1.7); g.fill();
+    circle(g, 11.4, 3.4, 1.7); g.fill();
+    g.strokeStyle = '#7a5000'; g.lineWidth = 0.4;
+    circle(g, 4.6, 3.4, 1.7); g.stroke();
+    circle(g, 11.4, 3.4, 1.7); g.stroke();
+    // 支脚
+    g.strokeStyle = '#1c2836'; g.lineWidth = 0.7; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(5.4, 13.2); g.lineTo(4.4, 14.8); g.stroke();
+    g.beginPath(); g.moveTo(10.6, 13.2); g.lineTo(11.6, 14.8); g.stroke();
     // 表盘
-    g.fillStyle = rgrad(g, 7, 6.6, 0.5, 8, 8.6, 5, [[0, '#ffffff'], [1, '#c8d2dc']]);
-    circle(g, 8, 8.6, 4.4); g.fill();
-    g.strokeStyle = '#4a545e'; g.lineWidth = 0.5; circle(g, 8, 8.6, 4.4); g.stroke();
-    // 刻度
-    g.fillStyle = '#4a545e';
-    g.fillRect(7.7, 4.8, 0.6, 1); g.fillRect(7.7, 11.4, 0.6, 1);
-    g.fillRect(4.8, 8.3, 1, 0.6); g.fillRect(10.2, 8.3, 1, 0.6);
+    g.fillStyle = rgrad(g, 6.6, 7, 0.6, 8, 9.2, 5.4, [[0, '#ffffff'], [1, '#c8d4de']]);
+    circle(g, 8, 9.2, 5.2); g.fill();
+    g.strokeStyle = '#1c2836'; g.lineWidth = 0.8; circle(g, 8, 9.2, 5.2); g.stroke();
+    // 12/3/6/9 刻度
+    g.fillStyle = '#1c2836';
+    g.fillRect(7.7, 4.8, 0.6, 1.1); g.fillRect(7.7, 12.5, 0.6, 1.1);
+    g.fillRect(3.7, 8.9, 1.1, 0.6); g.fillRect(11.2, 8.9, 1.1, 0.6);
     // 指针
-    g.strokeStyle = '#20242a'; g.lineWidth = 0.6; g.lineCap = 'round';
-    g.beginPath(); g.moveTo(8, 8.6); g.lineTo(8, 5.8); g.stroke();
-    g.beginPath(); g.moveTo(8, 8.6); g.lineTo(10.2, 9.4); g.stroke();
+    g.strokeStyle = '#101418'; g.lineWidth = 0.9;
+    g.beginPath(); g.moveTo(8, 9.2); g.lineTo(8, 6.1); g.stroke();
+    g.beginPath(); g.moveTo(8, 9.2); g.lineTo(10.7, 10.2); g.stroke();
+  });
+}
+
+// 变大：蘑菇（红帽白点 + 奶油柄 + 招牌眼睛，马力欧同款语义）
+function drawMushroom() {
+  return makeCanvas(16, 16, (g) => {
+    // 菌柄
+    g.fillStyle = lgrad(g, 0, 8, 0, 15, [[0, '#fff0d8'], [1, '#e0c090']]);
+    rr(g, 5.2, 8.6, 5.6, 6, 1.6); g.fill();
+    g.strokeStyle = '#8a5c28'; g.lineWidth = 0.5; rr(g, 5.2, 8.6, 5.6, 6, 1.6); g.stroke();
+    // 菌盖
+    g.beginPath();
+    g.moveTo(1.2, 9.4);
+    g.quadraticCurveTo(1.2, 2.2, 8, 1.6);
+    g.quadraticCurveTo(14.8, 2.2, 14.8, 9.4);
+    g.quadraticCurveTo(11.6, 7.6, 8, 7.6);
+    g.quadraticCurveTo(4.4, 7.6, 1.2, 9.4);
+    g.closePath();
+    g.fillStyle = lgrad(g, 0, 1.6, 0, 9.4, [[0, '#f06858'], [1, '#c02818']]); g.fill();
+    g.strokeStyle = '#6a0e08'; g.lineWidth = 0.6; g.stroke();
+    // 白点
+    g.fillStyle = '#fff8ec';
+    circle(g, 4.6, 5.2, 1.1); g.fill();
+    circle(g, 11.4, 5.2, 1.1); g.fill();
+    circle(g, 8, 3.4, 1.3); g.fill();
+    // 眼睛
+    g.fillStyle = '#28303a';
+    g.fillRect(6.6, 10, 1, 2.4);
+    g.fillRect(8.6, 10, 1, 2.4);
   });
 }
 
@@ -540,6 +588,34 @@ function drawBullet() {
   });
 }
 
+// ---- 导弹（12×12，巨型坦克专用：锥头弹体 + 尾翼 + 尾焰，朝上）----
+function drawMissile() {
+  return makeCanvas(12, 12, (g) => {
+    // 尾焰
+    g.fillStyle = rgrad(g, 6, 10.6, 0.3, 6, 11.2, 2.8, [
+      [0, '#fff8d0'], [0.5, '#ffb040'], [1, 'rgba(255,120,20,0)'],
+    ]);
+    circle(g, 6, 11, 2.8); g.fill();
+    // 尾翼
+    g.fillStyle = '#a8b4c0';
+    g.beginPath(); g.moveTo(4.2, 7.8); g.lineTo(2.4, 10.4); g.lineTo(4.4, 10.4); g.closePath(); g.fill();
+    g.beginPath(); g.moveTo(7.8, 7.8); g.lineTo(9.6, 10.4); g.lineTo(7.6, 10.4); g.closePath(); g.fill();
+    // 弹体
+    g.fillStyle = lgrad(g, 4.4, 0, 7.6, 0, [[0, '#f4f8fc'], [0.5, '#c8d2dc'], [1, '#8a96a2']]);
+    rr(g, 4.4, 2, 3.2, 8.4, 1.4); g.fill();
+    g.strokeStyle = '#39424b'; g.lineWidth = 0.4; rr(g, 4.4, 2, 3.2, 8.4, 1.4); g.stroke();
+    // 弹头（红色锥形）
+    g.beginPath();
+    g.moveTo(6, 0.5); g.lineTo(8, 2.6); g.lineTo(4, 2.6);
+    g.closePath();
+    g.fillStyle = '#f04838'; g.fill();
+    g.strokeStyle = '#801008'; g.lineWidth = 0.35; g.stroke();
+    // 白色识别环
+    g.fillStyle = '#ffffff';
+    g.fillRect(4.7, 3.4, 2.6, 0.8);
+  });
+}
+
 // ---- HUD 小图标（8×8）----
 function drawTankIcon(color) {
   return makeCanvas(8, 8, (g) => {
@@ -583,6 +659,20 @@ export function buildAssets() {
     ];
   }
 
+  // 蘑菇巨型形态：粗炮管 + 星徽（仅玩家/队友配色需要）
+  A.tanksBig = {};
+  for (const [name, p] of Object.entries(PALETTES)) {
+    if (!/^(player|ally)/.test(name)) continue;
+    const up0 = drawTankSprite(p, 0, true);
+    const up1 = drawTankSprite(p, 1, true);
+    A.tanksBig[name] = [
+      [up0, up1],
+      [rotate90(up0, 1), rotate90(up1, 1)],
+      [rotate90(up0, 2), rotate90(up1, 2)],
+      [rotate90(up0, 3), rotate90(up1, 3)],
+    ];
+  }
+
   // 地形
   A.brick = drawBrick();
   A.steel = drawSteel();
@@ -600,6 +690,7 @@ export function buildAssets() {
     life: drawLife(),
     shovel: drawShovel(),
     clock: drawClock(),
+    mushroom: drawMushroom(),
   };
 
   // 特效帧
@@ -609,6 +700,8 @@ export function buildAssets() {
   A.explBig = [0, 1, 2, 3].map(drawExplosionBig);
 
   A.bullet = drawBullet();
+  const missileUp = drawMissile();
+  A.missile = [missileUp, rotate90(missileUp, 1), rotate90(missileUp, 2), rotate90(missileUp, 3)];
   A.enemyIcon = drawTankIcon('#d04838');
   A.lifeIcon = drawTankIcon('#e8b838');
   A.flagIcon = drawFlag();
