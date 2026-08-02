@@ -67,6 +67,8 @@ global.localStorage = {
   getItem: (k) => (k in store ? store[k] : null),
   setItem: (k, v) => { store[k] = String(v); },
 };
+// GameOverScene 会提交排行榜成绩：指向不可达地址，fetch 立即被拒并静默返回 null
+global.location = { origin: 'http://127.0.0.1:1', host: '127.0.0.1:1', protocol: 'http:', search: '' };
 
 let rafCb = null;
 global.requestAnimationFrame = (cb) => { rafCb = cb; };
@@ -99,7 +101,16 @@ function check(name, cond) {
 // ---- 标题 → 开幕 ----
 console.log('— 场景流转 —');
 frames(10);
-check('初始为标题场景', game.engine.scene.constructor.name === 'TitleScene');
+check('未设置用户名时初始为设置场景', game.engine.scene.constructor.name === 'SettingsScene');
+check('设置场景要求先设置用户名', game.engine.scene.required === true);
+// 模拟保存用户名（输入框在 Node 测试桩下不可用，直接走保存路径）
+game.engine.scene.save('测试玩家');
+frames(5);
+check('保存后进入标题场景', game.engine.scene.constructor.name === 'TitleScene');
+check('用户名已持久化', game.username === '测试玩家' && localStorage.getItem('tank_username') === '测试玩家');
+check('标题菜单含排行榜与设置入口',
+  game.engine.scene.items.length === 6 && game.engine.scene.items[3] === '排行榜' &&
+  game.engine.scene.items[5] === '设置');
 key('Enter'); key('Enter', false);
 frames(5);
 check('确认后进入开幕场景', game.engine.scene.constructor.name === 'IntroScene');
@@ -226,6 +237,9 @@ console.log('— 道具效果 —');
 const lv0 = world.player.level;
 world._applyPowerup({ type: 'star', x: 0, y: 0 }, world.player);
 check('⭐ 升级生效', world.player.level === lv0 + 1);
+check('拾取道具飘出效果名称（含联机同步事件）',
+  world.floatTexts.some((f) => f.text === '升级!') &&
+  world.fxEvents.some((e) => e.k === 'ft' && e.text === '升级!'));
 world._applyPowerup({ type: 'helmet', x: 0, y: 0 }, world.player);
 check('🛡 护盾生效', world.player.shieldTimer > 0);
 world._applyPowerup({ type: 'clock', x: 0, y: 0 }, world.player);
@@ -244,6 +258,114 @@ if (world.enemies.length > 0) {
 }
 world.freezeTimer = 1; // 让冻结自然结束
 frames(5);
+
+// ---- 蘑菇：变大撞砖、被击中缩回（马力欧规则）----
+console.log('— 蘑菇变大 —');
+for (const e of world.enemies) e.alive = false; // 清场保证确定性
+world.enemies = [];
+// 清出一块 4×4 空地放巨型坦克
+for (let ty = 8; ty < 12; ty++) {
+  for (let tx = 8; tx < 12; tx++) {
+    const ci = world.tilemap.idx(tx, ty);
+    world.tilemap.cells[ci] = 0; world.tilemap.brickMask[ci] = 0;
+  }
+}
+world.player.x = 9 * 8; world.player.y = 9 * 8; world.player.dir = 0;
+world.player.shieldTimer = 0;
+// 先吃一个头盔护盾，再吃蘑菇：护盾应与蘑菇正常叠加保留
+world._applyPowerup({ type: 'helmet', x: 0, y: 0 }, world.player);
+const lvBeforeMush = world.player.level;
+const shieldBeforeMush = world.player.shieldTimer;
+world._applyPowerup({ type: 'mushroom', x: 0, y: 0 }, world.player);
+check('🍄 蘑菇变大生效', world.player.giant && world.player.w === 24);
+check('先吃护盾再吃蘑菇：护盾保留叠加',
+  world.player.shieldTimer === shieldBeforeMush && world.player.shieldTimer > 0);
+check('先吃星星再吃蘑菇：升级保留叠加', world.player.level === lvBeforeMush);
+check('拾取蘑菇飘出效果名称（含联机同步事件）',
+  world.floatTexts.some((f) => f.text === '变大!') &&
+  world.fxEvents.some((e) => e.k === 'ft' && e.text === '变大!'));
+// 面前放一堵砖墙，开过去应当砖碎人进
+for (const ty of [9, 10, 11]) {
+  const bi = world.tilemap.idx(12, ty);
+  world.tilemap.cells[bi] = 1; world.tilemap.brickMask[bi] = 0b1111;
+}
+world.player.setDir(1, world);
+for (let i = 0; i < 5; i++) world.player.applyControl(world, { dirHeld: () => 1, pressed: () => false });
+check('巨型坦克撞碎砖块前进',
+  world.tilemap.cells[world.tilemap.idx(12, 9)] === 0 &&
+  world.tilemap.cells[world.tilemap.idx(12, 10)] === 0 &&
+  world.player.x > 9 * 8);
+// 敌方子弹命中：缩回普通大小而不是阵亡（先清掉出生/变身残留的护盾，直击本体）
+const livesBeforeMush = world.lives[0];
+world.player.shieldTimer = 0;
+world.playerHit({ owner: { isPlayer: false }, x: 0, y: 0 }, world.player);
+check('巨型被击中缩回普通大小且不致死',
+  !world.player.giant && world.player.w === 16 && world.player.alive && world.lives[0] === livesBeforeMush);
+check('缩回后获得短暂无敌', world.player.shieldTimer > 0);
+check('缩回后移速恢复普通', world.player.speed === 1.3);
+world.player.shieldTimer = 0;
+// 队友误伤：只定身不缩小（同样先清盾直击）
+world._applyPowerup({ type: 'mushroom', x: 0, y: 0 }, world.player);
+world.player.shieldTimer = 0;
+world.playerHit({ owner: { isPlayer: true, slot: 1 }, x: 0, y: 0 }, world.player);
+check('队友误伤巨型只定身不缩小', world.player.giant && world.player.stunTimer > 0);
+// 巨型射出的是导弹（大弹体、更宽命中条带、飞行更快）
+world.player.dir = 0;
+world.spawnBullet(world.player);
+const shell = world.bullets[world.bullets.length - 1];
+check('巨型射出导弹', shell.big === true && shell.hitRect().w === 12);
+check('导弹飞行更快', shell.speed === world.player.bulletSpeed * 1.6);
+// 恢复普通状态，避免影响后续用例
+world.player.shrinkFromGiant();
+world.player.shieldTimer = 0; world.player.hitFlash = 0; world.player.stunTimer = 0;
+world.spawnBullet(world.player);
+check('缩回后子弹恢复普通', !world.bullets[world.bullets.length - 1].big);
+world.bullets = [];
+
+// ---- 导弹爆炸：一片砖墙粉碎 + 半径溅射 ----
+console.log('— 导弹爆炸 —');
+world._applyPowerup({ type: 'mushroom', x: 0, y: 0 }, world.player); // 重新变大
+world.player.x = 72; world.player.y = 72; world.player.dir = 0;
+world.player.shieldTimer = 0;
+// 清空 6..12 × 1..12 区域，铺一面 3×3 砖墙（第 2..4 行），侧面放一个敌坦
+for (let ty = 1; ty <= 12; ty++) {
+  for (let tx = 6; tx <= 12; tx++) {
+    const ci = world.tilemap.idx(tx, ty);
+    world.tilemap.cells[ci] = 0; world.tilemap.brickMask[ci] = 0;
+  }
+}
+for (let ty = 2; ty <= 4; ty++) {
+  for (let tx = 9; tx <= 11; tx++) {
+    const bi = world.tilemap.idx(tx, ty);
+    world.tilemap.cells[bi] = 1; world.tilemap.brickMask[bi] = 0b1111;
+  }
+}
+const { Enemy } = await import('../src/game/enemy.js');
+const dummy = new Enemy(60, 20, 'basic', false, Math.random);
+dummy.spawnTimer = 0;
+dummy.frozen = true;   // 冻结：AI 不会移动/开火，保证位置在爆炸半径内
+world.enemies = [dummy];
+world.spawnQueue = []; // 防止 frames 期间生成新敌坦干扰
+world.spawnBullet(world.player); // 向正上方发射导弹
+frames(30);
+check('导弹炸开一片砖墙',
+  world.tilemap.cells[world.tilemap.idx(9, 3)] === 0 &&
+  world.tilemap.cells[world.tilemap.idx(10, 3)] === 0 &&
+  world.tilemap.cells[world.tilemap.idx(11, 3)] === 0 &&
+  world.tilemap.cells[world.tilemap.idx(9, 4)] === 0 &&
+  world.tilemap.cells[world.tilemap.idx(11, 4)] === 0);
+check('导弹溅射击杀半径内敌坦', !dummy.alive);
+world.enemies = [];
+// 恢复普通状态
+world.player.shrinkFromGiant();
+world.player.shieldTimer = 0; world.player.hitFlash = 0; world.player.stunTimer = 0;
+world.bullets = [];
+// 蘑菇掉率低于其他道具
+world.rand = () => 0.02; world._dropPowerup();
+check('蘑菇走低掉率通道', world.powerups[0].type === 'mushroom');
+world.rand = () => 0.5; world._dropPowerup();
+check('常规道具走均分通道', world.powerups[0].type !== 'mushroom');
+world.rand = Math.random;
 
 // ---- 铁锹恢复墙避让坦克（防止坦克被嵌进墙里卡死）----
 console.log('— 围墙恢复避让 —');
@@ -384,6 +506,51 @@ console.log('— 本地双人 —');
   frames(10);
 }
 
+// ---- 回归：合作误伤不致死，改为定身（FC 原版规则）----
+console.log('— 合作误伤定身 —');
+{
+  const { World } = await import('../src/game/world.js');
+  const { NetInput } = await import('../src/core/input.js');
+  const { STUN_TIME } = await import('../src/core/const.js');
+
+  const g5 = Object.create(game);
+  g5.mode = '2p'; g5.playerLevels = [0, 0]; g5.lives = [3, 3]; g5.score = 0;
+  const w5 = new World(g5, 0);
+  w5.spawnTimer = 99999; // 不再出新敌坦，保持场景确定
+  const in5 = new NetInput();
+  const [a5, b5] = w5.players;
+  a5.shieldTimer = 0; a5.spawnTimer = 0;
+  b5.shieldTimer = 0; b5.spawnTimer = 0;
+  // P1 贴脸朝 P2 开火：子弹被队友阻挡，P2 定身但不阵亡、不扣命
+  a5.x = 64; a5.y = 96; a5.dir = 1;
+  b5.x = 96; b5.y = 96;
+  w5.spawnBullet(a5);
+  for (let f = 0; f < 40; f++) { w5.update([in5, in5]); in5.postUpdate(); }
+  check('队友子弹被阻挡消失', w5.bullets.length === 0);
+  check('误伤不致死不扣命', b5.alive && w5.lives[0] === 3 && w5.lives[1] === 3);
+  check('误伤导致定身', b5.stunTimer > 0);
+  check('误伤不重置等级', b5.level === 0);
+
+  // 定身期间不能移动/开火
+  const bx = b5.x;
+  const inMove = new NetInput();
+  inMove.state.right = true; inMove.pressedSet.fire = true;
+  for (let f = 0; f < 20; f++) { w5.update([in5, inMove]); in5.postUpdate(); inMove.postUpdate(); }
+  check('定身期间不能移动', b5.x === bx && !b5.moving);
+  check('定身期间不能开火', !w5.bullets.some((b) => b.owner === b5));
+
+  // 定身结束后恢复行动
+  for (let f = 0; f < STUN_TIME; f++) { w5.update([in5, in5]); in5.postUpdate(); }
+  check('定身计时结束', b5.stunTimer === 0);
+  for (let f = 0; f < 10; f++) { w5.update([in5, inMove]); in5.postUpdate(); inMove.postUpdate(); }
+  check('定身结束后恢复移动', b5.x > bx);
+
+  // 敌方子弹仍然致死
+  b5.shieldTimer = 0; b5.spawnTimer = 0;
+  w5.playerHit({ x: 0, y: 0 }, b5);
+  check('敌方子弹依旧致死', !b5.alive && w5.lives[1] === 2);
+}
+
 // ---- 回归：重生时出生点被占用（敌坦压杀 / 队友避让，防坦克重叠卡死）----
 console.log('— 重生占位处理 —');
 {
@@ -480,6 +647,21 @@ console.log('— 联网快照同步 —');
       const h = hostWorld.enemies.find((x) => x.id === e.id);
       return h && e.type === h.type && e.hp === h.hp && e.alive === h.alive;
     }));
+
+  // 巨型（蘑菇变大）状态随快照同步
+  hostWorld.players[0].giant = true; hostWorld.players[0].size = 24;
+  pushSnapshot(mirrorWorld, serializeWorld(hostWorld, {}), 1);
+  check('快照同步巨型状态', mirrorWorld.players[0].giant && mirrorWorld.players[0].w === 24);
+  hostWorld.players[0].giant = false; hostWorld.players[0].size = 16;
+  pushSnapshot(mirrorWorld, serializeWorld(hostWorld, {}), 1);
+  check('快照同步缩回普通大小', !mirrorWorld.players[0].giant && mirrorWorld.players[0].w === 16);
+
+  // 巨型玩家的炮弹标志随快照同步
+  hostWorld.players[0].giant = true;
+  hostWorld.players[0]._applyGiantState();
+  hostWorld.spawnBullet(hostWorld.players[0]);
+  pushSnapshot(mirrorWorld, serializeWorld(hostWorld, {}), 1);
+  check('快照同步炮弹标志', mirrorWorld.bullets.some((b) => b.big));
 
   // 插值到最新快照帧：位置收敛到主机位置（替代旧指数趋近）
   interpolateTo(mirrorWorld, snap.hf, 1);

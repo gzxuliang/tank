@@ -1,5 +1,8 @@
 // 联机协议 v3 测试：服务端权威、延迟抖动、开火确认、恢复连接和真实服务器
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 import { NetInput } from '../src/core/input.js';
@@ -8,6 +11,7 @@ import { NetGameController, NetGameSession } from '../src/net/session.js';
 import { pushSnapshot, serializeWorld } from '../src/net/sync.js';
 import { GameRegistry, PROTOCOL_VERSION, RealtimeGameService } from '../server/runtime/realtime-service.js';
 import { tankGameDefinition } from '../server/games/tank-match.js';
+import { LeaderboardStore } from '../server/leaderboard.js';
 
 const noop = () => {};
 let pass = 0;
@@ -332,7 +336,14 @@ console.log('— 玩家坦克子弹与快照平滑 —');
   world.lives = [3, 1];
   world.spawnBullet(shooter);
   world.bullets[0].update(world);
-  check('玩家子弹命中另一名玩家坦克后会消失并造成命中', !teammate.alive && world.bullets[0]?.alive === false);
+  // FC 原版规则：误伤不致死不扣命，改为定身
+  check('玩家子弹命中队友后消失但不再致死', teammate.alive && world.bullets[0]?.alive === false);
+  check('误伤改为定身且不扣命', teammate.stunTimer > 0 && world.lives[1] === 1);
+
+  // 快照携带定身状态，客机镜像照抄
+  const stunMirror = new World(makeGame(), 0);
+  pushSnapshot(stunMirror, serializeWorld(world, { hf: 11 }), 0);
+  check('快照同步定身状态', stunMirror.players[1].stunTimer === teammate.stunTimer);
 }
 
 console.log('— 250ms 往返延迟与 60ms 抖动 —');
@@ -472,12 +483,44 @@ console.log('— 250ms 往返延迟与 60ms 抖动 —');
   session.destroy();
 }
 
+console.log('— 排行榜存储 —');
+{
+  const lbFile = path.join(os.tmpdir(), `tank-lb-${process.pid}-${Date.now()}.json`);
+  const store = new LeaderboardStore(lbFile);
+  store.load();
+  check('空榜查询为空', store.list().length === 0);
+  check('提交合法成绩上榜', store.submit({ name: '阿伟', score: 3000, stage: 4, mode: '1p', cleared: false }).rank === 1);
+  check('同名更高分刷新最佳', store.submit({ name: '阿伟', score: 5000, stage: 5, mode: '1p' }).improved === true && store.list()[0].score === 5000);
+  check('同名低分不覆盖最佳', store.submit({ name: '阿伟', score: 100, stage: 1, mode: '1p' }).improved === false && store.list()[0].score === 5000);
+  check('他人成绩独立入榜次席', store.submit({ name: '彬彬', score: 4000, stage: 3, mode: '2p' }).rank === 2);
+  check('非法输入被拒绝', !store.submit({ name: '  ', score: 10, stage: 1, mode: '1p' }).ok
+    && !store.submit({ name: 'x', score: -1, stage: 1, mode: '1p' }).ok
+    && !store.submit({ name: 'x', score: 1.5, stage: 1, mode: '1p' }).ok
+    && !store.submit({ name: 'x', score: 10, stage: 1, mode: 'coop' }).ok);
+  const reload = new LeaderboardStore(lbFile);
+  reload.load();
+  check('成绩持久化到文件并可重载', reload.list().length === 2 && reload.list()[0].name === '阿伟');
+  fs.writeFileSync(lbFile, '{{{');
+  const broken = new LeaderboardStore(lbFile);
+  broken.load();
+  check('损坏的榜单文件被容忍', broken.list().length === 0);
+  const small = new LeaderboardStore(path.join(os.tmpdir(), `tank-lb-small-${process.pid}-${Date.now()}.json`), { max: 3 });
+  for (const [n, s] of [['a', 100], ['b', 200], ['c', 300]]) small.submit({ name: n, score: s, stage: 1, mode: '1p' });
+  const over = small.submit({ name: 'd', score: 50, stage: 1, mode: '1p' });
+  check('榜单按容量截断且溢出者无名次', small.list(10).length === 3 && over.rank === null);
+}
+
 console.log('— 真实 Node 服务器协议 —');
 {
   const port = 18_000 + Math.floor(Math.random() * 2_000);
   const serverPath = fileURLToPath(new URL('../server/server.js', import.meta.url));
   const child = spawn(process.execPath, [serverPath], {
-    env: { ...process.env, PORT: String(port) },
+    env: {
+      ...process.env,
+      PORT: String(port),
+      LEADERBOARD_RATE_MS: '0', // 测试关闭限速
+      LEADERBOARD_FILE: path.join(os.tmpdir(), `tank-lb-it-${port}.json`), // 不污染仓库 server/data/
+    },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
 
@@ -568,6 +611,27 @@ console.log('— 真实 Node 服务器协议 —');
     const closed = new Promise((resolve) => oversized.ws.once('close', (code) => resolve(code)));
     oversized.ws.send(JSON.stringify({ t: 'input', frames: [{ data: 'x'.repeat(70 * 1024) }] }));
     check('超过 64KB 的消息仍会被断开', (await closed) === 1009);
+
+    const api = `http://127.0.0.1:${port}`;
+    const lb0 = await (await fetch(`${api}/api/leaderboard`)).json();
+    check('排行榜接口返回榜单数组', Array.isArray(lb0.list));
+    const posted = await fetch(`${api}/api/score`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: '测试员', score: 12345, stage: 6, mode: '1p', cleared: false }),
+    });
+    check('真实服务器接受成绩上传', posted.status === 200 && (await posted.json()).rank === 1);
+    const lb1 = await (await fetch(`${api}/api/leaderboard?limit=10`)).json();
+    check('真实服务器榜单可查询', lb1.list.length === 1 && lb1.list[0].name === '测试员' && lb1.list[0].score === 12345);
+    const bad = await fetch(`${api}/api/score`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: '{"name":"x","score":"很大","stage":1,"mode":"1p"}',
+    });
+    check('非法成绩返回 400', bad.status === 400);
+    const huge = await fetch(`${api}/api/score`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: 'x'.repeat(5000),
+    });
+    check('超大请求体返回 413', huge.status === 413);
+    check('新增接口不影响静态托管', (await fetch(`${api}/index.html`)).status === 200);
 
     host.ws.close();
     resumedClient.ws.close();
