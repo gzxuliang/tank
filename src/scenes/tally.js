@@ -7,6 +7,7 @@ import { ENEMY_TYPES } from '../game/enemy.js';
 import { LEVELS } from '../game/levels.js';
 import { IntroScene } from './intro.js';
 import { TitleScene } from './title.js';
+import { submitScore } from '../net/leaderboard.js';
 
 const ORDER = ['basic', 'fast', 'power', 'armor'];
 const NAMES = { basic: '普通', fast: '快速', power: '火力', armor: '装甲' };
@@ -30,6 +31,10 @@ export class TallyScene {
     this.doneTimer = 0;
     this.clearedAll = stageIndex + 1 >= LEVELS.length;
     this.retryAt = 0;
+    // 通关同样上传排行榜（普通失败在 GameOverScene 上传）
+    if (this.clearedAll && game.score > 0) {
+      submitScore({ name: game.username, score: game.score, stage: LEVELS.length, mode: game.mode, cleared: true });
+    }
   }
 
   get total() {

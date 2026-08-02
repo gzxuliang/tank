@@ -4,6 +4,8 @@ import { drawText } from '../core/text.js';
 import { blit } from '../core/assets.js';
 import { IntroScene } from './intro.js';
 import { LobbyScene } from './lobby.js';
+import { RankScene } from './rank.js';
+import { SettingsScene } from './settings.js';
 import { LEVELS } from '../game/levels.js';
 
 export class TitleScene {
@@ -31,7 +33,9 @@ export class TitleScene {
       '单人游戏',
       '双人游戏',
       '联网对战',
+      '排行榜',
       `选择关卡 < 第 ${this.startStage} 关 >`,
+      '设置',
     ];
   }
 
@@ -47,7 +51,8 @@ export class TitleScene {
       this.menuIndex = (this.menuIndex + 1) % this.items.length;
       this.game.audio.hitWall();
     }
-    if (this.menuIndex === 3) {
+    if (this.menuIndex === 4) {
+      // 选择关卡
       if (input.pressed('left') && this.startStage > 1) { this.startStage--; this.game.audio.hitWall(); }
       if (input.pressed('right') && this.startStage < this.unlocked) { this.startStage++; this.game.audio.hitWall(); }
     }
@@ -58,8 +63,16 @@ export class TitleScene {
         // 联网对战：进入大厅（创建/加入房间）
         this.game.audio.stopBgm();
         this.game.engine.changeScene(new LobbyScene(this.game));
+      } else if (this.menuIndex === 3) {
+        // 排行榜
+        this.game.audio.stopBgm();
+        this.game.engine.changeScene(new RankScene(this.game));
+      } else if (this.menuIndex === 5) {
+        // 设置（修改用户名）
+        this.game.audio.stopBgm();
+        this.game.engine.changeScene(new SettingsScene(this.game));
       } else {
-        // 单人 / 双人本地开局
+        // 单人 / 双人本地开局（在「选择关卡」上确认则按所选关卡以单人开局）
         this.game.mode = this.menuIndex === 1 ? '2p' : '1p';
         if (this.menuIndex === 0 || this.menuIndex === 1) this.startStage = 1;
         this.game.resetRun();
@@ -93,7 +106,11 @@ export class TitleScene {
       blit(ctx, A.grass[(x >> 3) & 1], x, LOGICAL_H - 20);
     }
     // 菜单小坦克光标（履带滚动）
-    blit(ctx, A.tanks.player0[1][(this.t >> 3) & 1], 52, 112 + this.menuIndex * 18);
+    const cursorY = this.menuIndex >= 4 ? 170 + (this.menuIndex - 4) * 12 : 105 + this.menuIndex * 16;
+    blit(ctx, A.tanks.player0[1][(this.t >> 3) & 1], 52, cursorY);
+    // 主入口与辅助项之间的分隔线
+    ctx.fillStyle = '#262640';
+    ctx.fillRect(84, 168, 88, 1);
   }
 
   renderText(dctx) {
@@ -107,31 +124,32 @@ export class TitleScene {
     });
 
     // 最高分
-    drawText(dctx, `最高分 ${this.game.hiScore}`, cx, 88, {
+    drawText(dctx, `最高分 ${this.game.hiScore}`, cx, 86, {
       size: 8, align: 'center', color: '#f0f0f0',
     });
 
     // 断线提示
     if (this.notice && this.t < 300) {
-      drawText(dctx, this.notice, cx, 102, {
+      drawText(dctx, this.notice, cx, 98, {
         size: 7, align: 'center', color: '#f04838', shadow: null,
       });
     }
 
-    // 菜单
+    // 菜单：主入口（大字号）与辅助项（小字号暗色）分层，避免拥挤
     const items = this.items;
     for (let i = 0; i < items.length; i++) {
       const sel = i === this.menuIndex;
-      drawText(dctx, items[i], cx, 114 + i * 18, {
-        size: 10, align: 'center',
-        color: sel ? '#f8c820' : '#a0a0a0',
+      const aux = i >= 4;
+      drawText(dctx, items[i], cx, aux ? 174 + (i - 4) * 12 : 108 + i * 16, {
+        size: aux ? 8 : 10, align: 'center',
+        color: sel ? '#f8c820' : (aux ? '#787888' : '#a0a0a0'),
         glow: sel ? '#a06810' : null,
       });
     }
 
     // 操作提示（闪烁）：避开底部砖墙/草丛装饰
     if ((this.t >> 5) % 2 === 0) {
-      drawText(dctx, '方向键选择 · Enter 确认', cx, 192, {
+      drawText(dctx, '方向键选择 · Enter 确认', cx, 201, {
         size: 7, align: 'center', color: '#888888', shadow: null,
       });
     }

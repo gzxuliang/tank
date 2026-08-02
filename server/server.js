@@ -8,12 +8,21 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { GameRegistry, RealtimeGameService } from './runtime/realtime-service.js';
 import { tankGameDefinition } from './games/tank-match.js';
+import { LeaderboardStore, createLeaderboardHandler } from './leaderboard.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = process.env.PORT || 8000;
 const MAX_CONN_PER_IP = Number(process.env.MAX_CONN_PER_IP || 20);
 const ROOM_IDLE_MS = Number(process.env.ROOM_IDLE_MINUTES || 30) * 60 * 1000;
 const HEARTBEAT_MS = 30 * 1000;
+
+const LEADERBOARD_FILE = process.env.LEADERBOARD_FILE || path.join(ROOT, 'server', 'data', 'leaderboard.json');
+const leaderboard = new LeaderboardStore(LEADERBOARD_FILE);
+leaderboard.load();
+console.log(`排行榜已加载 ${leaderboard.entries.length} 条成绩（${LEADERBOARD_FILE}）`);
+const leaderboardApi = createLeaderboardHandler(leaderboard, {
+  rateMs: Number(process.env.LEADERBOARD_RATE_MS ?? 5000),
+});
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -30,10 +39,12 @@ const MIME = {
 // 静态文件只从白名单路径提供服务：仅 /index.html 与 /src/ 目录可访问，
 // 其余（.git、server/、部署脚本、镜像包、test/ 等）一律 403，
 // 防止仓库内的敏感文件被 HTTP 下载；穿越检查保留作纵深防御。
+// /api/ 排行榜接口在白名单检查之前单独处理。
 const onRequest = (req, res) => {
   let urlPath;
   try { urlPath = decodeURIComponent((req.url || '/').split('?')[0]); }
   catch { res.writeHead(400); res.end('Bad Request'); return; }
+  if (urlPath.startsWith('/api/')) { leaderboardApi(req, res); return; }
   if (urlPath === '/') urlPath = '/index.html';
   if (urlPath !== '/index.html' && !urlPath.startsWith('/src/')) {
     res.writeHead(403);

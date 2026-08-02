@@ -2,3 +2,4 @@ node_modules
 public
 .playwright-mcp
 .wrangler
+server/data/

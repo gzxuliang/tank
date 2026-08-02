@@ -52,3 +52,23 @@ body {
     color: #a8a8c0;
     user-select: none;
 }
+
+/* 用户名编辑输入框（标题画面内嵌，Enter 保存 / Esc 取消） */
+#stage-wrap .name-input {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 70%;
+    padding: 8px 10px;
+    font-size: 18px;
+    font-weight: bold;
+    text-align: center;
+    color: #f8c820;
+    background: rgba(5, 5, 16, 0.92);
+    border: 2px solid #f8c820;
+    border-radius: 4px;
+    outline: none;
+    caret-color: #f8c820;
+    line-height: normal;
+}

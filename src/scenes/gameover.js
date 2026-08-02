@@ -3,6 +3,7 @@ import { LOGICAL_W, LOGICAL_H } from '../core/const.js';
 import { drawText } from '../core/text.js';
 import { blit } from '../core/assets.js';
 import { TitleScene } from './title.js';
+import { submitScore } from '../net/leaderboard.js';
 
 export class GameOverScene {
   constructor(game, stageIndex, reason) {
@@ -13,6 +14,20 @@ export class GameOverScene {
     this.readyRequested = false;
     this.retryAt = 0;
     this.newRecord = game.commitHiScore();
+    // 上传排行榜（每个名字保留最佳成绩；失败仅影响提示行）
+    this.upload = null;      // null(不上传) | sending | ok | fail
+    this.uploadRank = null;
+    this.uploadImproved = false;
+    if (game.score > 0) {
+      this.upload = 'sending';
+      submitScore({
+        name: game.username, score: game.score,
+        stage: stageIndex + 1, mode: game.mode, cleared: false,
+      }).then((r) => {
+        if (r) { this.upload = 'ok'; this.uploadRank = r.rank; this.uploadImproved = !!r.improved; }
+        else this.upload = 'fail';
+      });
+    }
   }
 
   update() {
@@ -83,6 +98,17 @@ export class GameOverScene {
         drawText(dctx, '★ 新纪录 ★', cx, 164, {
           size: 10, align: 'center', color: '#f8c820', glow: '#a06810', shadow: null,
         });
+      }
+      // 排行榜上传状态
+      if (this.upload === 'sending') {
+        drawText(dctx, '排行榜上传中…', cx, 176, { size: 7, align: 'center', color: '#888888', shadow: null });
+      } else if (this.upload === 'ok') {
+        const msg = this.uploadRank && this.uploadImproved ? `已上榜：第 ${this.uploadRank} 名`
+          : this.uploadRank ? '未刷新个人最佳'
+          : '未进榜单前 100 名';
+        drawText(dctx, msg, cx, 176, { size: 7, align: 'center', color: this.uploadImproved ? '#68d8f0' : '#888888', shadow: null });
+      } else if (this.upload === 'fail') {
+        drawText(dctx, '排行榜上传失败', cx, 176, { size: 7, align: 'center', color: '#f04838', shadow: null });
       }
       if (this.game.net) {
         const prompt = this.game.net.isReady() ? '等待另一位玩家…' :

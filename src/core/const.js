@@ -58,9 +58,15 @@ export const SPAWN_SHIELD_TIME = 60 * 3; // 出生短暂无敌
 export const FREEZE_TIME = 60 * 10;      // 时钟冻结
 export const SHOVEL_TIME = 60 * 20;      // 铁锹钢墙
 export const SHOVEL_BLINK_TIME = 60 * 3; // 恢复前闪烁
+export const STUN_TIME = 60 * 4;         // 队友误伤定身（FC 原版：误伤不致死但麻痹）
 export const POWERUP_LIFE = 60 * 12;     // 道具存在时长
 export const POWERUP_SCORE = 500;
+export const MUSHROOM_RATE = 0.1;        // 蘑菇（变大）掉率，低于其余六种（各均分 15%）——威力强所以更稀有
+export const GIANT_SIZE = 24;            // 蘑菇变大后的坦克尺寸（1.5 倍）
+export const GIANT_HIT_SHIELD = 90;      // 巨型被击中缩回后的短暂无敌（帧）
+export const PLAYER_SPEED = 1.3;         // 玩家基础移速（巨型形态同样用此速度）
 
 // 存档键
 export const LS_HISCORE = 'tank_hiscore';
 export const LS_STAGE = 'tank_unlock_stage';
+export const LS_USERNAME = 'tank_username';
